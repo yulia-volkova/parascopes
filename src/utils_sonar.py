@@ -1,4 +1,4 @@
-# %%
+# %% FUNCTION THAT GETS CE LOSS FOR SONAR DECODER
 from sonar.models.sonar_text import (
     load_sonar_text_decoder_model,
     load_sonar_text_encoder_model,
@@ -11,164 +11,220 @@ from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
 from fairseq2.models.sequence import SequenceBatch
 from fairseq2.nn.padding import PaddingMask
 from fairseq2.data.text import TextTokenDecoder
-
+from sonar.nn.conditional_decoder_model import ConditionalTransformerDecoderModel
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-text2vec = TextToEmbeddingModelPipeline(encoder="text_sonar_basic_encoder", tokenizer="text_sonar_basic_encoder", device=DEVICE)
-vec2text = EmbeddingToTextModelPipeline(decoder="text_sonar_basic_decoder", tokenizer="text_sonar_basic_encoder", device=DEVICE)
-tokenizer = load_sonar_tokenizer("text_sonar_basic_encoder")
 
-torch.set_grad_enabled(False)
+class SonarDecoderCELoss(torch.nn.Module):
+    def __init__(self,
+            repo="text_sonar_basic_decoder",
+            lang="eng_Latn",
+            device=DEVICE,
+            dtype=None,
+            preloaded_decoder=None,
+            skip_first_token=True
+        ):
+        super().__init__()
+        if preloaded_decoder is None:
+            self.model: ConditionalTransformerDecoderModel = load_sonar_text_decoder_model(repo, device=device, dtype=dtype)
+        else:
+            self.model: ConditionalTransformerDecoderModel = preloaded_decoder
+        self.tokenizer = self.model.tokenizer
+        self.tokenizer_decoder = self.tokenizer.create_decoder()
+        self.tokenizer_encoder = self.tokenizer.create_encoder(device=device)
+        self.device = device
+        self.lang = lang
+        self.skip_first_token = skip_first_token
 
-# %%
+        print(type(self.model))
 
-def get_ce_loss_decoder(model, input_embed, expected_text, target_lang="eng_Latn", device=DEVICE, dtype=None):
-    """
-    Compute cross-entropy loss between decoder output and expected text.
+    def tokenize_text(self, expected_text):    # Tokenize the expected text
+        if isinstance(expected_text, str):
+            expected_text = [expected_text]
 
-    Args:
-        input_embed: Tensor of shape [batch_size, embedding_dim] - SONAR embeddings
-        expected_text: List of strings - the expected output text
-        decoder: String or decoder model
-        tokenizer: String or tokenizer
-        target_lang: Target language code
-        device: Device to run on
-        dtype: Data type to use
+        expected_tokens = [self.tokenizer_encoder(text) for text in expected_text]
 
-    Returns:
-        Cross-entropy loss
-    """
-    # Tokenize the expected text
-    tokenizer_decoder = model.tokenizer.create_decoder()
-    tokenizer_encoder = model.tokenizer.create_encoder(device=device)
-    expected_tokens = [tokenizer_encoder(text) for text in expected_text]
-    bos_tensor = torch.tensor([3], device=expected_tokens[0].device, dtype=expected_tokens[0].dtype)
-    expected_tokens = [torch.cat([bos_tensor, tokens]) for tokens in expected_tokens]
+        # IMPORTANT: Add BOS token to the start of the expected tokens
+        bos_tensor = torch.tensor([3], device=expected_tokens[0].device, dtype=expected_tokens[0].dtype)
+        expected_tokens = [torch.cat([bos_tensor, tokens]) for tokens in expected_tokens]
 
-    # Create padding mask and collate the expected tokens
-    max_len = max(len(tokens) for tokens in expected_tokens)
-    padded_tokens = []
-    padding_mask_list = []
+        # Create padding mask and collate the expected tokens
+        max_len = max(len(tokens) for tokens in expected_tokens)
+        padded_tokens = []
+        padding_mask_list = []
 
-    for tokens in expected_tokens:
-        pad_len = max_len - len(tokens)
-        padded = torch.cat([tokens, torch.full((pad_len,), model.tokenizer.vocab_info.pad_idx,
-                                              device=tokens.device, dtype=tokens.dtype)])
-        padded_tokens.append(padded)
-        padding_mask_list.append(torch.cat([torch.ones(len(tokens), dtype=torch.bool, device=tokens.device),
-                                           torch.zeros(pad_len, dtype=torch.bool, device=tokens.device)]))
+        for tokens in expected_tokens:
+            pad_len = max_len - len(tokens)
+            padded = torch.cat([tokens, torch.full((pad_len,), self.tokenizer.vocab_info.pad_idx,
+                                                device=tokens.device, dtype=tokens.dtype)])
+            padded_tokens.append(padded)
+            padding_mask_list.append(torch.cat([torch.ones(len(tokens), dtype=torch.bool, device=tokens.device),
+                                            torch.zeros(pad_len, dtype=torch.bool, device=tokens.device)]))
 
-    target_tokens = torch.stack(padded_tokens).to(device)
-    stacked_padding_mask = torch.stack(padding_mask_list)
+        target_tokens = torch.stack(padded_tokens).to(self.device)
+        stacked_padding_mask = torch.stack(padding_mask_list)
 
-    # Create PaddingMask with both the mask and sequence length
-    seq_lens = torch.sum(stacked_padding_mask, dim=1).to(torch.int)
-    padding_mask = PaddingMask(stacked_padding_mask, seq_lens)
+        # Create PaddingMask with both the mask and sequence length
+        seq_lens = torch.sum(stacked_padding_mask, dim=1).to(torch.int)
+        padding_mask = PaddingMask(stacked_padding_mask, seq_lens)
 
-    # Ensure input_embed is properly shaped [batch_size, 1, embedding_dim]
-    if input_embed.dim() == 2:
-        input_embed = input_embed.unsqueeze(1)
+        # Split into input tokens (all but last) and target tokens (all but first)
+        input_tokens = target_tokens[:, :-1]  # Remove last token
+        target_labels = target_tokens[:, 1:]  # Remove first token (BOS)
 
-    # Split into input tokens (all but last) and target tokens (all but first)
-    input_tokens = target_tokens[:, :-1]  # Remove last token
-    target_labels = target_tokens[:, 1:]  # Remove first token (BOS)
+        # Create appropriate padding masks
+        input_seq_lens = torch.clamp(seq_lens - 1, min=0)
+        input_padding_mask = PaddingMask(input_seq_lens, batch_seq_len=max_len - 1)
 
-    # Create appropriate padding masks
-    input_seq_lens = torch.clamp(seq_lens - 1, min=0)
-    input_padding_mask = PaddingMask(input_seq_lens, batch_seq_len=max_len - 1)
+        return {
+            "original_tokens": expected_text,
+            "input_tokens": input_tokens,
+            "target_labels": target_labels,
+            "input_padding_mask": input_padding_mask,
+            "padding_mask": padding_mask
+        }
 
-    # Forward pass through model components
-    with torch.no_grad():
+    def get_logits(self, input_embed, input_tokens, input_padding_mask, **kwargs):
         # Prepare encoder output (our embedding)
+        # Ensure input_embed is properly shaped [batch_size, 1, embedding_dim]
+        if input_embed.dim() == 2:
+            input_embed = input_embed.unsqueeze(1)
+
         encoder_output = input_embed
         encoder_padding_mask = None
 
-        print("Input tokens: ", [(x.item(), tokenizer_decoder(x[None])) for x in input_tokens.flatten()])
-
         # Get decoder frontend features (token embeddings + positional encoding)
-        seqs, padding_mask_dec = model.model.decoder.decoder_frontend(
+        seqs, padding_mask_dec = self.model.model.decoder.decoder_frontend(
             input_tokens, input_padding_mask)
 
-        print({"Seqs": seqs.shape})
-        # print("Seqs: ", [(x.item(), tokenizer_decoder(x[None])) for x in seqs.flatten()])
-
         # Run through decoder
-        decoder_output, _ = model.model.decoder.decoder(
-            seqs.to(device), padding_mask_dec.to(device), encoder_output.to(device), encoder_padding_mask)
-
-        print(decoder_output.shape)
+        decoder_output, _ = self.model.model.decoder.decoder(
+            seqs.to(self.device),
+            padding_mask=padding_mask_dec.to(self.device),
+            encoder_output=encoder_output.to(self.device),
+            encoder_padding_mask=encoder_padding_mask
+        )
 
         # Get logits by projecting
-        logits = model.model.project(decoder_output, padding_mask_dec).logits
+        logit_data = self.model.model.decoder.project(decoder_output, padding_mask_dec)
+        return logit_data.logits
 
-    # Calculate cross-entropy loss
-    loss = F.cross_entropy(
-        logits.view(-1, logits.size(-1)),
-        target_labels.reshape(-1),
-        ignore_index=model.tokenizer.vocab_info.pad_idx
-    )
+    def _skip_first_token(self, target_labels):
+        for b in range(target_labels.size(0)):
+            for t in range(target_labels.size(1)):
+                if target_labels[b, t] != self.tokenizer.vocab_info.pad_idx:
+                    target_labels[b, t] = self.tokenizer.vocab_info.pad_idx
+                    break
+        return target_labels
 
-    # Calculate accuracy and token probabilities
-    probs = F.softmax(logits, dim=-1)
+    def calculate_loss(self, logits, target_labels):
+        return F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            target_labels.reshape(-1),
+            ignore_index=self.tokenizer.vocab_info.pad_idx
+        )
 
-    # Track per-token probabilities and predictions
-    batch_size, seq_len, vocab_size = logits.shape
-    token_probs = []
-    correct_count = 0
-    total_count = 0
 
-    print("\nTOKEN PREDICTIONS:")
-    vocab = model.tokenizer.vocab_info
+    def calculate_accuracy(self, logits, token_data, verbose=False):
+        probs = F.softmax(logits, dim=-1)
 
-    for b in range(batch_size):
-        for s in range(seq_len):
-            # Skip padding tokens
-            if s >= input_seq_lens[b]:
-                continue
+        # Track per-token probabilities and predictions
+        batch_size, seq_len, vocab_size = logits.shape
+        token_probs = []
+        correct_count = 0
+        total_count = 0
 
-            # Get the predicted and target token
-            pred_idx = torch.argmax(logits[b, s]).item()
-            target_idx = target_labels[b, s].item()
+        print("\nTOKEN PREDICTIONS:")
+        vocab = self.tokenizer.vocab_info
 
-            # Skip padding in target
-            if target_idx == vocab.pad_idx:
-                continue
+        for b in range(batch_size):
+            print("-"*12)
+            for s in range(seq_len):
+                # Skip padding tokens
+                if s >= token_data["input_padding_mask"].seq_lens[b]:
+                    continue
 
-            # Track statistics
-            total_count += 1
-            correct = (pred_idx == target_idx)
-            if correct:
-                correct_count += 1
+                # Get the predicted and target token
+                pred_idx = torch.argmax(logits[b, s]).item()
+                target_idx = token_data["target_labels"][b, s].item()
 
-            # Get probability of the target token
-            target_prob = probs[b, s, target_idx].item()
-            token_probs.append(target_prob)
+                # Skip padding in target
+                if target_idx == vocab.pad_idx:
+                    continue
 
-            # Print token information
-            prefix = "✓" if correct else "✗"
-            dec = lambda x: tokenizer_decoder(torch.tensor([x]))
-            print(f"{prefix} Position {s+1}: Target prob={target_prob:.4f}, Predicted: {pred_idx} '{dec(pred_idx)}', Expected: {target_idx} '{dec(target_idx)}'")
+                # Track statistics
+                total_count += 1
+                correct = (pred_idx == target_idx)
+                if correct:
+                    correct_count += 1
 
-    # Print summary statistics
-    accuracy = correct_count / total_count if total_count > 0 else 0
-    avg_prob = sum(token_probs) / len(token_probs) if token_probs else 0
+                # Get probability of the target token
+                target_prob = probs[b, s, target_idx].item()
+                token_probs.append(target_prob)
 
-    print(f"\nSUMMARY:")
-    print(f"Accuracy: {accuracy:.2f} ({correct_count}/{total_count})")
-    print(f"Average target token probability: {avg_prob:.4f}")
-    print(f"Loss: {loss.item():.4f}")
+                # Print token information
+                prefix = "✓" if correct else "✗"
+                dec = lambda x: self.tokenizer_decoder(torch.tensor([x]))
+                if verbose:
+                    print(f"{prefix} Position {s+1}: Target prob={target_prob:.4f}, Predicted: {pred_idx} '{dec(pred_idx)}', Expected: {target_idx} '{dec(target_idx)}'")
 
-    return loss
+        accuracy_data = {
+            "accuracy": correct_count / total_count if total_count > 0 else 0,
+            "avg_prob": sum(token_probs) / len(token_probs) if token_probs else 0,
+        }
+
+        return accuracy_data
+
+    def get_ce_loss_decoder(self, input_embed, expected_text):
+        token_data = self.tokenize_text(expected_text)
+        logits = self.get_logits(input_embed, **token_data)
+
+        if self.skip_first_token:
+            token_data["target_labels"] = self._skip_first_token(token_data["target_labels"])
+
+        loss = self.calculate_loss(logits, token_data["target_labels"])
+
+        return loss
+
+    def __call__(self, input_embed, expected_text):
+        return self.get_ce_loss_decoder(input_embed, expected_text)
+
+    def verbose_loss(self, input_embed, expected_text, verbose=True):
+        token_data = self.tokenize_text(expected_text)
+        logits = self.get_logits(input_embed, **token_data)
+
+        if self.skip_first_token:
+            token_data["target_labels"] = self._skip_first_token(token_data["target_labels"])
+
+        # Print summary statistics
+        loss = self.calculate_loss(logits, token_data["target_labels"])
+        accuracy_data = self.calculate_accuracy(logits, token_data, verbose=verbose)
+
+        print(f"\nSUMMARY:")
+        print(f"Accuracy: {accuracy_data['accuracy']:.2f}")
+        print(f"Average target token probability: {accuracy_data['avg_prob']:.4f}")
+        print(f"Loss: {loss.item():.4f}")
+        return loss
+
 
 if __name__ == "__main__":
-    example_text = "Greetings from the Sonar team!"
-    input_embed = torch.randn(1, 1, 1024)
-    loss = get_ce_loss_decoder(vec2text, input_embed, [example_text], device=DEVICE)
-    print(loss)
-    input_embed = text2vec.predict([example_text], source_lang="eng_Latn")
+    # Load up the models
+    text2vec = TextToEmbeddingModelPipeline(encoder="text_sonar_basic_encoder", tokenizer="text_sonar_basic_encoder", device=DEVICE)
+    vec2text = EmbeddingToTextModelPipeline(decoder="text_sonar_basic_decoder", tokenizer="text_sonar_basic_encoder", device=DEVICE)
+    sonar_decoder = SonarDecoderCELoss(preloaded_decoder=vec2text)
+    example_texts = ["Greetings from the Sonar team!", "Hello, how are you?"]
+
+    # test with random input
+    input_embed = torch.randn(2, 1, 1024)
+    loss = sonar_decoder.verbose_loss(input_embed, example_texts)
+    print()
+
+    # check that original model can reconstruct
+    input_embed = text2vec.predict(example_texts, source_lang="eng_Latn")
     output_text = vec2text.predict(input_embed, target_lang="eng_Latn")
     print(output_text)
 
-    loss = get_ce_loss_decoder(vec2text, input_embed, [example_text], device=DEVICE)
+    # check with good input
+    loss = sonar_decoder.verbose_loss(input_embed, example_texts)
     print(loss)
 # %%

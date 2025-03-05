@@ -104,7 +104,7 @@ class Trainer:
         for file_idx in (pbar := tqdm(range(self.c.num_files), desc=f"Epoch {epoch+1}")):
             train_loader, num_batches = self.create_data_loader(file_idx, shuffle=True)
 
-            for x, y, texts in train_loader:
+            for curr_batch, (x, y, texts) in enumerate(train_loader):
                 x = self.normalizer_res.normalize(x.to(self.device))
                 y = self.normalizer_emb.normalize(y.to(self.device))
 
@@ -117,9 +117,8 @@ class Trainer:
                     train_losses[key] += value
                 train_batches += 1
                 pbar.set_postfix({
-                    "Loss": f"{train_losses['loss']/train_batches:.4f}",
-                    **loss_data,
-                    "Batch": f"{train_batches}/{num_batches}",
+                    "batch": f"{curr_batch}/{num_batches}",
+                    **{k:(v/train_batches) for k,v in train_losses.items()},
                 })
 
                 del x, y, texts, loss, loss_data
@@ -136,11 +135,11 @@ class Trainer:
         val_losses = defaultdict(float)
 
         VALIDATION_FILE_INDEX = 99
+        val_batches = 0
         with torch.no_grad():
             test_loader, num_batches = self.create_data_loader(VALIDATION_FILE_INDEX, shuffle=False)
-            num_batches = 0
 
-            for x, y, texts in (pbar := tqdm(test_loader, desc="Validating")):
+            for curr_batch, (x, y, texts) in enumerate(pbar := tqdm(test_loader, desc="Validating")):
                 x = self.normalizer_res.normalize(x.to(self.device))
                 y = self.normalizer_emb.normalize(y.to(self.device))
 
@@ -152,17 +151,16 @@ class Trainer:
                 del x, y, texts, loss
                 gc.collect()
                 torch.cuda.empty_cache()
-                num_batches += 1
+                val_batches += 1
                 pbar.set_postfix({
-                    "Loss": f"{val_losses['loss']/num_batches:.4f}",
-                    **loss_data,
-                    "Batch": f"{num_batches}/{num_batches}",
+                    "batch": f"{curr_batch}/{num_batches}",
+                    **{k:(v/val_batches) for k,v in val_losses.items()},
                 })
             del test_loader
             gc.collect()
             torch.cuda.empty_cache()
 
-        return {f"val_{key}": (value/num_batches) for key, value in val_losses.items()}
+        return {f"val_{key}": (value/val_batches) for key, value in val_losses.items()}
 
     def train(self):
         torch.set_grad_enabled(True)

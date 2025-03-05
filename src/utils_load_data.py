@@ -5,9 +5,10 @@ import einops
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.set_grad_enabled(False)
+folder = "../data"
 
 def load_res_data(index, group_size=4, groups_to_load=2):
-    file_path = f"./tensors/res_data_{index:03d}.pt"
+    file_path = f"{folder}/res_tensors/res_data_{index:03d}.pt"
     data = torch.load(file_path, map_location="cpu", weights_only=False)
     data = torch.cat(data, dim=2)  # Concatenate list of tensors
     data = data.squeeze(0)
@@ -18,7 +19,7 @@ def load_res_data(index, group_size=4, groups_to_load=2):
     return data.float()
 
 def load_embeds(index):
-    file_path = f"./sonar_embeds/embeds_{index:03d}.pt"
+    file_path = f"{folder}/sonar_embeds/embeds_{index:03d}.pt"
     data = torch.load(file_path, map_location="cpu", weights_only=False)
     data = torch.cat(data, dim=0)
     return data.float()
@@ -27,6 +28,12 @@ def load_embeds(index):
 from itertools import chain
 def flatten(nested_list):
     return list(chain.from_iterable(nested_list))
+
+def load_split_paragraphs(index):
+    file_path = f"{folder}/split_paragraphs/paragraphs_{index:03d}.json"
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+    return data
 
 def load_paragraphs():
     file_path = "/workspace/SPAR/gen-dataset/new_split_dataset.jsonl"
@@ -60,3 +67,10 @@ def load_full_contexts():
             context = "".join(tokens[:i])
             contexts.append(context)
     return contexts
+
+if __name__ == "__main__":
+    print(load_res_data(0).shape)
+    print(load_embeds(0).shape)
+    print(len(load_paragraphs()))
+    print(len(load_split_paragraphs(0)))
+# %%

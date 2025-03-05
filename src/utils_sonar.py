@@ -22,14 +22,23 @@ class SonarDecoderCELoss(torch.nn.Module):
             device=DEVICE,
             dtype=None,
             preloaded_decoder=None,
+            preloaded_tokenizer=None,
             skip_first_token=True
         ):
         super().__init__()
         if preloaded_decoder is None:
-            self.model: ConditionalTransformerDecoderModel = load_sonar_text_decoder_model(repo, device=device, dtype=dtype)
+            # self.model: ConditionalTransformerDecoderModel = vec2text.model
+            vec2text = EmbeddingToTextModelPipeline(decoder="text_sonar_basic_decoder", tokenizer="text_sonar_basic_encoder", device=device)
+            self.model = vec2text.model
+            self.decoder = self.model.decoder
+            self.tokenizer = vec2text.tokenizer
+
         else:
             self.model: ConditionalTransformerDecoderModel = preloaded_decoder
-        self.tokenizer = self.model.tokenizer
+            self.decoder = self.model.decoder
+            self.tokenizer = preloaded_tokenizer
+
+        self.model.requires_grad_(True)
         self.tokenizer_decoder = self.tokenizer.create_decoder()
         self.tokenizer_encoder = self.tokenizer.create_encoder(device=device)
         self.device = device
@@ -94,11 +103,11 @@ class SonarDecoderCELoss(torch.nn.Module):
         encoder_padding_mask = None
 
         # Get decoder frontend features (token embeddings + positional encoding)
-        seqs, padding_mask_dec = self.model.model.decoder.decoder_frontend(
+        seqs, padding_mask_dec = self.decoder.decoder_frontend(
             input_tokens, input_padding_mask)
 
         # Run through decoder
-        decoder_output, _ = self.model.model.decoder.decoder(
+        decoder_output, _ = self.decoder.decoder(
             seqs.to(self.device),
             padding_mask=padding_mask_dec.to(self.device),
             encoder_output=encoder_output.to(self.device),
@@ -106,16 +115,18 @@ class SonarDecoderCELoss(torch.nn.Module):
         )
 
         # Get logits by projecting
-        logit_data = self.model.model.decoder.project(decoder_output, padding_mask_dec)
+        logit_data = self.decoder.project(decoder_output, padding_mask_dec)
         return logit_data.logits
 
     def _skip_first_token(self, target_labels):
-        for b in range(target_labels.size(0)):
-            for t in range(target_labels.size(1)):
-                if target_labels[b, t] != self.tokenizer.vocab_info.pad_idx:
-                    target_labels[b, t] = self.tokenizer.vocab_info.pad_idx
+        # Create copy to avoid inplace modification
+        modified_labels = target_labels.clone()
+        for b in range(modified_labels.size(0)):
+            for t in range(modified_labels.size(1)):
+                if modified_labels[b, t] != self.tokenizer.vocab_info.pad_idx:
+                    modified_labels[b, t] = self.tokenizer.vocab_info.pad_idx
                     break
-        return target_labels
+        return modified_labels
 
     def calculate_loss(self, logits, target_labels):
         return F.cross_entropy(
@@ -176,11 +187,12 @@ class SonarDecoderCELoss(torch.nn.Module):
         return accuracy_data
 
     def get_ce_loss_decoder(self, input_embed, expected_text):
-        token_data = self.tokenize_text(expected_text)
         logits = self.get_logits(input_embed, **token_data)
 
-        if self.skip_first_token:
-            token_data["target_labels"] = self._skip_first_token(token_data["target_labels"])
+        with torch.no_grad():
+            token_data = self.tokenize_text(expected_text)
+            if self.skip_first_token:
+                token_data["target_labels"] = self._skip_first_token(token_data["target_labels"])
 
         loss = self.calculate_loss(logits, token_data["target_labels"])
 
@@ -211,10 +223,15 @@ if __name__ == "__main__":
     # Load up the models
     text2vec = TextToEmbeddingModelPipeline(encoder="text_sonar_basic_encoder", tokenizer="text_sonar_basic_encoder", device=DEVICE)
     vec2text = EmbeddingToTextModelPipeline(decoder="text_sonar_basic_decoder", tokenizer="text_sonar_basic_encoder", device=DEVICE)
-    sonar_decoder = SonarDecoderCELoss(preloaded_decoder=vec2text)
+    model: ConditionalTransformerDecoderModel = vec2text.model
+    model.requires_grad_(True)
+
+    # sonar_decoder = SonarDecoderCELoss(preloaded_decoder=model, preloaded_tokenizer=vec2text.tokenizer)
+    sonar_decoder = SonarDecoderCELoss()
     example_texts = ["Greetings from the Sonar team!", "Hello, how are you?"]
 
     # test with random input
+    print("Checking LOSS with random input")
     input_embed = torch.randn(2, 1, 1024)
     loss = sonar_decoder.verbose_loss(input_embed, example_texts)
     print()
@@ -225,6 +242,12 @@ if __name__ == "__main__":
     print(output_text)
 
     # check with good input
-    loss = sonar_decoder.verbose_loss(input_embed, example_texts)
+    print("Checking LOSS with good input")
+    input_embed_new = input_embed.clone().requires_grad_(True)
+    loss = sonar_decoder.verbose_loss(input_embed_new, example_texts)
     print(loss)
+
+    # check loss gradients
+    loss.backward()
+    print(input_embed_new.grad)
 # %%

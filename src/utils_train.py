@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from torch.utils.data import DataLoader, TensorDataset
 from utils_models  import Linear, MLP
 from utils_welford import load_or_compute_welford_stats, Normalizer
-from utils_load_data import load_res_data, load_embeds
+from utils_load_data import load_res_data, load_embeds, load_split_paragraphs
+from utils_sonar import SonarDecoderCELoss
+from collections import defaultdict
 
 class Trainer:
     def __init__(self, config, device):
@@ -16,8 +18,8 @@ class Trainer:
         self.device = device
 
         welford_data = load_or_compute_welford_stats(self.c.groups_to_load)
-        self.normalizer_emb = welford_data.norm_emb
-        self.normalizer_res = welford_data.norm_res
+        self.normalizer_emb: Normalizer = welford_data.norm_emb
+        self.normalizer_res: Normalizer = welford_data.norm_res
 
         d_res = load_res_data(0, self.c.group_size, self.c.groups_to_load).shape[-1]
         self._config["d_res"] = d_res
@@ -29,8 +31,7 @@ class Trainer:
             lr=self.c.lr,
             weight_decay=self.c.weight_decay
         )
-        self.criterion = torch.nn.MSELoss()
-        self.criterion_decoder = torch.nn.CrossEntropyLoss()
+        self.criterion_mse = torch.nn.MSELoss()
 
         # Initialize learning rate scheduler: reduce LR by a factor of 0.9 every
         # epoch
@@ -40,9 +41,8 @@ class Trainer:
         self.use_decoder = self.c.use_decoder if "use_decoder" in self._config else False
 
         if self.use_decoder:
-            from sonar.inference_pipelines.text import EmbeddingToTextModelPipeline
-            self.decoder = EmbeddingToTextModelPipeline(encoder="text_sonar_basic_encoder", tokenizer="text_sonar_basic_encoder", device=self.device)
-            self.decoder.eval()
+            self.decoder_loss = SonarDecoderCELoss()
+            self.decoder_loss.model.eval()
 
     @property
     def c(self):
@@ -56,115 +56,114 @@ class Trainer:
         else:
             raise ValueError(f"Unknown model type: {self.c.model_type}")
 
-    def get_decoder_loss(self, input_embeds, target_text):
-        outputs = self.decoder(input_embeds)
-        loss = self.criterion(outputs, target_text)
-        return loss
+    def create_data_loader(self, file_idx, shuffle=False):
+        res_data = load_res_data(file_idx, groups_to_load=self.c.groups_to_load)
+        embeds = load_embeds(file_idx)
+        paragraphs = load_split_paragraphs(file_idx)
+        indices = torch.arange(len(paragraphs))
+        dataset = TensorDataset(res_data, embeds, indices)
+        __data_loader = DataLoader(dataset, batch_size=self.c.batch_size, shuffle=shuffle)
+
+        def get_batch(__data_loader):
+            for x, y, idxs in __data_loader:
+                texts = [paragraphs[i] for i in idxs.cpu().numpy()]
+                yield x, y, texts
+
+        return get_batch(__data_loader)
+
+    def calculate_total_loss(self, input_embeds, target_embeds, target_text=None, use_decoder=None):
+        if use_decoder is None:
+            use_decoder = self.use_decoder
+
+        # Initialise "loss" variables
+        loss_mse = torch.tensor(0.0, device=self.device)
+        loss_ce = torch.tensor(0.0, device=self.device)
+
+        # get the (noarmalized) approximate output
+        outputs = self.model(input_embeds)
+
+        # calculate MSE loss
+        loss_mse = self.criterion_mse(outputs, target_embeds)
+
+        if use_decoder: # get CE loss from the decoder (need to unnormalize y)
+            y_unnormed = self.normalizer_emb.restore(input_embeds)
+            loss_ce = self.get_decoder_loss(y_unnormed, target_text)
+
+        loss = loss_mse + loss_ce
+        loss_data = {"loss": loss.item(), "loss_mse": loss_mse.item(), "loss_ce": loss_ce.item()}
+        return loss, loss_data
 
     def train_epoch(self, epoch):
         self.model.train()
-        train_loss = 0
+        train_losses = defaultdict(float)
         train_batches = 0
 
         for file_idx in (pbar := tqdm(range(self.c.num_files), desc=f"Epoch {epoch+1}")):
-            res_data = load_res_data(file_idx, groups_to_load=self.c.groups_to_load)
-            embeds = load_embeds(file_idx)
-            dataset = TensorDataset(res_data, embeds)
-            train_loader = DataLoader(dataset, batch_size=self.c.batch_size, shuffle=True)
+            train_loader = self.create_data_loader(file_idx, shuffle=True)
 
-            for x, y in train_loader:
+            for x, y, texts in train_loader:
                 x = self.normalizer_res.normalize(x.to(self.device))
                 y = self.normalizer_emb.normalize(y.to(self.device))
 
-                self.optimizer.zero_grad()
-                outputs = self.model(x)
-                loss = self.criterion(outputs, y)
+                loss, loss_data = self.calculate_total_loss(x, y, texts, use_decoder=self.use_decoder)
                 loss.backward()
                 self.optimizer.step()
+                self.optimizer.zero_grad()
 
-                train_loss += loss.item()
+                for key, value in loss_data.items():
+                    train_losses[key] += value
                 train_batches += 1
-                pbar.set_postfix({"Loss": f"{train_loss/train_batches:.4f}"})
+                pbar.set_postfix({"Loss": f"{train_losses['loss']/train_batches:.4f}", **loss_data})
 
-            del res_data, embeds, dataset
+            del train_loader, x, y, texts, loss
             gc.collect()
             torch.cuda.empty_cache()
 
-        return train_loss / train_batches
-
-    def train_epoch_with_decoder(self, epoch):
-        self.model.train()
-        train_loss = 0
-        train_batches = 0
-
-        for file_idx in (pbar := tqdm(range(self.c.num_files), desc=f"Epoch {epoch+1}")):
-            res_data = load_res_data(file_idx, groups_to_load=self.c.groups_to_load)
-            embeds = load_embeds(file_idx)
-            dataset = TensorDataset(res_data, embeds)
-            train_loader = DataLoader(dataset, batch_size=self.c.batch_size, shuffle=True)
-
-            for x, y in train_loader:
-                x = self.normalizer_res.normalize(x.to(self.device))
-                y = self.normalizer_emb.normalize(y.to(self.device))
-
-                self.optimizer.zero_grad()
-                outputs = self.model(x)
-                loss = self.criterion(outputs, y)
-                loss.backward()
-                self.optimizer.step()
-
-                train_loss += loss.item()
-                train_batches += 1
-                pbar.set_postfix({"Loss": f"{train_loss/train_batches:.4f}"})
-
-            del res_data, embeds, dataset
-            gc.collect()
-            torch.cuda.empty_cache()
-
-        return train_loss / train_batches
+        return {f"train_{key}": (value/train_batches) for key, value in train_losses.items()}
 
     @torch.no_grad()
     def validate(self):
         self.model.eval()
-        val_loss = 0
+        val_losses = defaultdict(float)
+
         VALIDATION_FILE_INDEX = 99
         with torch.no_grad():
-            res_data = load_res_data(VALIDATION_FILE_INDEX, groups_to_load=self.c.groups_to_load)
-            embeds = load_embeds(VALIDATION_FILE_INDEX)
-            dataset = TensorDataset(res_data, embeds)
-            test_loader = DataLoader(dataset, batch_size=self.c.batch_size)
+            test_loader = self.create_data_loader(VALIDATION_FILE_INDEX, shuffle=False)
+            num_batches = 0
 
-            for x, y in test_loader:
+            for x, y, texts in test_loader:
                 x = self.normalizer_res.normalize(x.to(self.device))
                 y = self.normalizer_emb.normalize(y.to(self.device))
-                outputs = self.model(x)
-                val_loss += self.criterion(outputs, y).item()
+
+                loss, loss_data = self.calculate_total_loss(x, y, texts, use_decoder=self.use_decoder)
+                for key, value in loss_data.items():
+                    val_losses[key] += value
 
                 # clear cache
-                del x, y, outputs
+                del x, y, texts, loss
                 gc.collect()
                 torch.cuda.empty_cache()
-
-            del res_data, embeds, dataset
+                num_batches += 1
+            del test_loader
             gc.collect()
             torch.cuda.empty_cache()
 
-        return val_loss / len(test_loader)
+        return {f"val_{key}": (value/num_batches) for key, value in val_losses.items()}
 
     def train(self):
         torch.set_grad_enabled(True)
 
         for epoch in range(self.c.num_epochs):
-            train_loss = self.train_epoch(epoch)
-            val_loss = self.validate()  # Validate on next file
+            train_losses = self.train_epoch(epoch)
+            val_losses = self.validate()  # Validate on next file
 
             wandb.log({
                 "epoch": epoch + 1,
-                "train_loss": train_loss,
-                "val_loss": val_loss,
+                **train_losses,
+                **val_losses,
             })
 
-            print(f"Epoch {epoch+1}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            print(f"Epoch {epoch+1}: Train Loss: {train_losses['train_loss']:.4f}, Val Loss: {val_losses['val_loss']:.4f}")
 
             # Step the learning rate scheduler
             self.scheduler.step()

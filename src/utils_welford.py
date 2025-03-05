@@ -35,8 +35,8 @@ class WelfordData:
 
 def load_or_compute_welford_stats(groups_to_load):
     """Load or compute Welford statistics for normalization"""
-    os.makedirs('./welford_data', exist_ok=True)
-    welford_file = f'./welford_data/welford_stats_10_{groups_to_load}.pkl'
+    os.makedirs('../data/welford_data', exist_ok=True)
+    welford_file = f'../data/welford_data/welford_stats_10_{groups_to_load}.pkl'
 
     try:
         with open(welford_file, 'rb') as f:

@@ -23,7 +23,8 @@ class SonarDecoderCELoss(torch.nn.Module):
             dtype=None,
             preloaded_decoder=None,
             preloaded_tokenizer=None,
-            skip_first_token=True
+            skip_first_token=True,
+            max_tokens=None
         ):
         super().__init__()
         if preloaded_decoder is None:
@@ -44,7 +45,7 @@ class SonarDecoderCELoss(torch.nn.Module):
         self.device = device
         self.lang = lang
         self.skip_first_token = skip_first_token
-
+        self.max_tokens = max_tokens if max_tokens is not None else 512
         print(type(self.model))
 
     def tokenize_text(self, expected_text):    # Tokenize the expected text
@@ -52,6 +53,7 @@ class SonarDecoderCELoss(torch.nn.Module):
             expected_text = [expected_text]
 
         expected_tokens = [self.tokenizer_encoder(text) for text in expected_text]
+        expected_tokens = [tokens[:self.max_tokens] for tokens in expected_tokens]
 
         # IMPORTANT: Add BOS token to the start of the expected tokens
         bos_tensor = torch.tensor([3], device=expected_tokens[0].device, dtype=expected_tokens[0].dtype)
@@ -187,6 +189,7 @@ class SonarDecoderCELoss(torch.nn.Module):
         return accuracy_data
 
     def get_ce_loss_decoder(self, input_embed, expected_text):
+        token_data = self.tokenize_text(expected_text)
         logits = self.get_logits(input_embed, **token_data)
 
         with torch.no_grad():
@@ -242,8 +245,21 @@ if __name__ == "__main__":
     print(output_text)
 
     # check with good input
-    print("Checking LOSS with good input")
-    input_embed_new = input_embed.clone().requires_grad_(True)
+    with torch.no_grad():
+        print("Checking LOSS with good input")
+        input_embed_new = input_embed.clone().requires_grad_(True)
+        loss = sonar_decoder.verbose_loss(input_embed_new, example_texts)
+        print(loss)
+
+    # check with max_tokens
+    with torch.no_grad():
+        sonar_decoder.max_tokens = 5
+        input_embed_new = input_embed.clone().requires_grad_(True)
+        loss = sonar_decoder.verbose_loss(input_embed_new, example_texts)
+        print(loss)
+
+    # check with gradients
+    input_embed_new.requires_grad_(True)
     loss = sonar_decoder.verbose_loss(input_embed_new, example_texts)
     print(loss)
 

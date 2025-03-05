@@ -1,3 +1,4 @@
+# %%
 import os
 import gc
 import pickle
@@ -39,9 +40,11 @@ class Trainer:
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1, gamma=self.lr_decay)
 
         self.use_decoder = self.c.use_decoder if "use_decoder" in self._config else False
+        self.decoder_max_tokens = self.c.decoder_max_tokens if "decoder_max_tokens" in self._config else None
+        self.decoder_coeff = self.c.decoder_coeff if "decoder_coeff" in self._config else 1.0
 
         if self.use_decoder:
-            self.decoder_loss = SonarDecoderCELoss()
+            self.decoder_loss = SonarDecoderCELoss(max_tokens=self.decoder_max_tokens)
             self.decoder_loss.model.eval()
 
     @property
@@ -69,7 +72,7 @@ class Trainer:
                 texts = [paragraphs[i] for i in idxs.cpu().numpy()]
                 yield x, y, texts
 
-        return get_batch(__data_loader)
+        return get_batch(__data_loader), len(__data_loader)
 
     def calculate_total_loss(self, input_embeds, target_embeds, target_text=None, use_decoder=None):
         if use_decoder is None:
@@ -86,8 +89,8 @@ class Trainer:
         loss_mse = self.criterion_mse(outputs, target_embeds)
 
         if use_decoder: # get CE loss from the decoder (need to unnormalize y)
-            y_unnormed = self.normalizer_emb.restore(input_embeds)
-            loss_ce = self.get_decoder_loss(y_unnormed, target_text)
+            y_unnormed = self.normalizer_emb.restore(outputs)
+            loss_ce = self.decoder_loss(y_unnormed, target_text)
 
         loss = loss_mse + loss_ce
         loss_data = {"loss": loss.item(), "loss_mse": loss_mse.item(), "loss_ce": loss_ce.item()}
@@ -99,7 +102,7 @@ class Trainer:
         train_batches = 0
 
         for file_idx in (pbar := tqdm(range(self.c.num_files), desc=f"Epoch {epoch+1}")):
-            train_loader = self.create_data_loader(file_idx, shuffle=True)
+            train_loader, num_batches = self.create_data_loader(file_idx, shuffle=True)
 
             for x, y, texts in train_loader:
                 x = self.normalizer_res.normalize(x.to(self.device))
@@ -113,9 +116,15 @@ class Trainer:
                 for key, value in loss_data.items():
                     train_losses[key] += value
                 train_batches += 1
-                pbar.set_postfix({"Loss": f"{train_losses['loss']/train_batches:.4f}", **loss_data})
+                pbar.set_postfix({
+                    "Loss": f"{train_losses['loss']/train_batches:.4f}",
+                    **loss_data,
+                    "Batch": f"{train_batches}/{num_batches}",
+                })
 
-            del train_loader, x, y, texts, loss
+                del x, y, texts, loss, loss_data
+
+            del train_loader
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -128,10 +137,10 @@ class Trainer:
 
         VALIDATION_FILE_INDEX = 99
         with torch.no_grad():
-            test_loader = self.create_data_loader(VALIDATION_FILE_INDEX, shuffle=False)
+            test_loader, num_batches = self.create_data_loader(VALIDATION_FILE_INDEX, shuffle=False)
             num_batches = 0
 
-            for x, y, texts in test_loader:
+            for x, y, texts in (pbar := tqdm(test_loader, desc="Validating")):
                 x = self.normalizer_res.normalize(x.to(self.device))
                 y = self.normalizer_emb.normalize(y.to(self.device))
 
@@ -144,6 +153,11 @@ class Trainer:
                 gc.collect()
                 torch.cuda.empty_cache()
                 num_batches += 1
+                pbar.set_postfix({
+                    "Loss": f"{val_losses['loss']/num_batches:.4f}",
+                    **loss_data,
+                    "Batch": f"{num_batches}/{num_batches}",
+                })
             del test_loader
             gc.collect()
             torch.cuda.empty_cache()
@@ -201,7 +215,7 @@ class Trainer:
         run_id = run.id
         print(run, run.config)
         model_type = run.config['model_type']
-        filename = f"./checkpoints/sweeps/{run_id}_{model_type}.pkl"
+        filename = f"../data/checkpoints/sweeps/{run_id}_{model_type}.pkl"
 
         if not os.path.exists(filename):
             raise FileNotFoundError(f"Checkpoint file not found: {filename}")
@@ -210,3 +224,5 @@ class Trainer:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         return cls.load_checkpoint(filename, device=device)
+
+# %%

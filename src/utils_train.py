@@ -90,7 +90,7 @@ class Trainer:
 
         if use_decoder: # get CE loss from the decoder (need to unnormalize y)
             y_unnormed = self.normalizer_emb.restore(outputs)
-            loss_ce = self.decoder_loss(y_unnormed, target_text)
+            loss_ce = self.decoder_coeff * self.decoder_loss(y_unnormed, target_text)
 
         loss = loss_mse + loss_ce
         loss_data = {"loss": loss.item(), "loss_mse": loss_mse.item(), "loss_ce": loss_ce.item()}

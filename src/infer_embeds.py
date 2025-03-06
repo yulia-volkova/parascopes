@@ -1,14 +1,14 @@
 import os
 from argparse import ArgumentParser
 import torch
-from utils_load_data import load_res_data  # Assumption: This returns a torch.Tensor or similar.
+from utils_load_data import load_res_data, BASE_DIR  # Assumption: This returns a torch.Tensor or similar.
 from utils_train import Trainer         # Assumption: Trainer class handles model loading & normalization.
 
 NUM_COPIES = 1
 #PREFIX = "sonar-sweeps"
 PREFIX  = "notebooks-sonar"
-POSTFIX = "_98"
-INDEX = 98
+POSTFIX = "_99"
+INDEX = 99
 
 
 def main():
@@ -37,7 +37,7 @@ def main():
         predicted_embeds = trainer.normalizer_emb.restore(predicted)
 
     # Setup the output file path and check whether it exists.
-    output_dir = "inferred_outputs"
+    output_dir = f"{BASEDIR}/inferred_outputs"
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"inferred_embeds_{args.wandb_run_name}{POSTFIX}_{model_type}.pt")
     if os.path.exists(output_path):

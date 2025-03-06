@@ -3,7 +3,7 @@ import json  # for saving output as JSON
 from argparse import ArgumentParser
 import torch
 from tqdm import tqdm
-from utils_load_data import load_embeds
+from utils_load_data import load_embeds, BASE_DIR
 
 from sonar.inference_pipelines.text import EmbeddingToTextModelPipeline
 
@@ -42,13 +42,17 @@ def main():
         device=device
     )
 
+    print(vec2text_model.device)
+
     # Define the fixed file to load.
-    #input_path  = "inferred_outputs/inferred_embeds_iqzigl1h.pt"
-    #output_path = "comparison_texts/mlp_decoded_texts.json"
-    #input_path = "inferred_outputs/inferred_embeds_4nbwxrar_98_linear.pt"
-    #output_path = "comparison_texts/linear_train_decoded_texts.json"
-    input_path = "inferred_outputs/inferred_embeds_iqzigl1h_98_mlp.pt"
-    output_path = "comparison_texts/mlp_train_decoded_texts.json"
+    #input_path  = f"{BASE_DIR}/inferred_outputs/inferred_embeds_iqzigl1h.pt"
+    #output_path = f"{BASE_DIR}/comparison_texts/mlp_decoded_texts.json"
+    #input_path = f"{BASE_DIR}/inferred_outputs/inferred_embeds_4nbwxrar_98_linear.pt"
+    #output_path = f"{BASE_DIR}/comparison_texts/linear_train_decoded_texts.json"
+    #input_path = f"{BASE_DIR}/inferred_outputs/inferred_embeds_iqzigl1h_98_mlp.pt"
+    #output_path = f"{BASE_DIR}/comparison_texts/mlp_train_decoded_texts.json"
+    input_path = f"{BASE_DIR}/inferred_outputs/inferred_embeds_fnjt2per_99_linear.pt"
+    output_path = f"{BASE_DIR}/comparison_texts/linear_ce_decoded_texts.json"
     if not os.path.isfile(input_path):
         print(f"File not found: {input_path}")
         return

@@ -22,7 +22,7 @@ if __name__ == "__main__":
     trainer.model.eval()
     DEVICE = trainer.device
 
-    print("Testing some outputs")
+    print(f"Testing some outputs, running on {DEVICE}")
     from sonar.inference_pipelines.text import EmbeddingToTextModelPipeline
     vec2text_model = EmbeddingToTextModelPipeline(decoder="text_sonar_basic_decoder", tokenizer="text_sonar_basic_encoder", device=DEVICE)
 

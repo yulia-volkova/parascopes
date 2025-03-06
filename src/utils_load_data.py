@@ -3,9 +3,11 @@ import json
 import torch
 import einops
 
+BASE_DIR = "../data"
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.set_grad_enabled(False)
-folder = "../data"
+folder = BASE_DIR
 
 def load_res_data(index, group_size=4, groups_to_load=2):
     file_path = f"{folder}/res_tensors/res_data_{index:03d}.pt"

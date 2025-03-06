@@ -41,8 +41,13 @@ def main():
         tokenizer="text_sonar_basic_encoder",
         device=device
     )
+    vec2text_model = vec2text_model.to(torch.float16)
 
+    torch.compile(vec2text_model)
+
+    print("- using:")
     print(vec2text_model.device)
+    print(vec2text_model.model.decoder.decoder_frontend.embed.weight.dtype)
 
     # Define the fixed file to load.
     #input_path  = f"{BASE_DIR}/inferred_outputs/inferred_embeds_iqzigl1h.pt"
@@ -56,7 +61,7 @@ def main():
     if not os.path.isfile(input_path):
         print(f"File not found: {input_path}")
         return
-    embeds = torch.load(input_path).to(device)
+    embeds = torch.load(input_path).to(device, torch.float16)
 
 
     # embeds = load_embeds(99).to(device)
@@ -75,4 +80,5 @@ def main():
     print(f"Decoded texts saved to: {output_path}")
 
 if __name__ == "__main__":
-    main()
+    with torch.inference_mode():
+        main()

@@ -9,6 +9,7 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 from utils_plot import load_rubric_results
+from utils_load_data import BASE_DIR
 
 def compute_cosine_similarity(ref_embeddings, comp_embeddings):
     """ Compute the cosine similarity between two arrays of embeddings. """
@@ -119,20 +120,22 @@ def plot_cosine_similarity_violin(df_plot, output_image):
 
 if __name__ == "__main__":
 
-    cossim_plot_path = "cossim-plot.png"
+    cossim_plot_path = f"{BASE_DIR}/figues/cossim-plot.png"
+    folder = f"{BASE_DIR}/comparison_texts"
 
     # Manually list the files.
-    ref_file = "comparison_texts/original_texts.json"
+    ref_file = f"{folder}/original_texts.json"
     compare_files = {
-        "mlp": "comparison_texts/mlp_decoded_texts.json",
-        "linear": "comparison_texts/linear_decoded_texts.json",
-        "continued": "comparison_texts/parascope_continuation_texts.json",
-        "baseline": "comparison_texts/baseline_0_outputs.json",
-        "cheat-1": "comparison_texts/baseline_1_outputs.json",
-        "cheat-5": "comparison_texts/baseline_5_outputs.json",
-        "cheat-10": "comparison_texts/baseline_10_outputs.json",
-        "regenerated": "comparison_texts/regenerated_outputs.json",
-        "auto-decoded": "comparison_texts/original_decoded_texts.json",
+        "mlp": f"{folder}/mlp_decoded_texts.json",
+        "linear": f"{folder}/linear_decoded_texts.json",
+        "linear-ce": f"{folder}/linear_ce_decoded_texts.json",
+        "continued": f"{folder}/parascope_continuation_texts.json",
+        "baseline": f"{folder}/baseline_0_outputs.json",
+        "cheat-1": f"{folder}/baseline_1_outputs.json",
+        "cheat-5": f"{folder}/baseline_5_outputs.json",
+        "cheat-10": f"{folder}/baseline_10_outputs.json",
+        "regenerated": f"{folder}/regenerated_outputs.json",
+        "auto-decoded": f"{folder}/original_decoded_texts.json",
     }
 
     df_plot = get_cosine_similarity_data(ref_file, compare_files)
@@ -145,17 +148,20 @@ import json
 
 print("\n=== [Original Text] vs [Other Text] by Cosine Sim Buckets (0.1 increments) ===\n")
 
-ref_file = "comparison_texts/original_texts.json"
+folder = f"{BASE_DIR}/comparison_texts"
+
+ref_file = f"{folder}/original_texts.json"
 compare_files = {
-    "mlp": "comparison_texts/mlp_decoded_texts.json",
-    "linear": "comparison_texts/linear_decoded_texts.json",
-    "continued": "comparison_texts/parascope_continuation_texts.json",
-    "baseline": "comparison_texts/baseline_0_outputs.json",
-    "cheat-1": "comparison_texts/baseline_1_outputs.json",
-    "cheat-5": "comparison_texts/baseline_5_outputs.json",
-    "cheat-10": "comparison_texts/baseline_10_outputs.json",
-    "regenerated": "comparison_texts/regenerated_outputs.json",
-    "auto-decoded": "comparison_texts/original_decoded_texts.json",
+    "mlp": f"{folder}/mlp_decoded_texts.json",
+    "linear": f"{folder}/linear_decoded_texts.json",
+    "linear-ce": f"{folder}/linear_ce_decoded_texts.json",
+    "continued": f"{folder}/parascope_continuation_texts.json",
+    "baseline": f"{folder}/baseline_0_outputs.json",
+    "cheat-1": f"{folder}/baseline_1_outputs.json",
+    "cheat-5": f"{folder}/baseline_5_outputs.json",
+    "cheat-10": f"{folder}/baseline_10_outputs.json",
+    "regenerated": f"{folder}/regenerated_outputs.json",
+    "auto-decoded": f"{folder}/original_decoded_texts.json",
 }
 
 # Load original texts.

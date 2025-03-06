@@ -37,7 +37,7 @@ def main():
         predicted_embeds = trainer.normalizer_emb.restore(predicted)
 
     # Setup the output file path and check whether it exists.
-    output_dir = f"{BASEDIR}/inferred_outputs"
+    output_dir = f"{BASE_DIR}/inferred_outputs"
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"inferred_embeds_{args.wandb_run_name}{POSTFIX}_{model_type}.pt")
     if os.path.exists(output_path):

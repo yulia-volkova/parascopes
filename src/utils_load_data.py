@@ -37,6 +37,12 @@ def load_split_paragraphs(index):
         data = json.load(f)
     return data
 
+def load_split_paragraphs_inputs(index):
+    file_path = f"{folder}/split_input_paragraphs/paragraphs_{index:03d}.json"
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+    return data
+
 def load_paragraphs():
     file_path = "/workspace/SPAR/gen-dataset/new_split_dataset.jsonl"
     with open(file_path, 'r') as f:
@@ -75,4 +81,7 @@ if __name__ == "__main__":
     print(load_embeds(0).shape)
     print(len(load_paragraphs()))
     print(len(load_split_paragraphs(0)))
+    print(len(load_split_paragraphs_inputs(0)))
+
+    assert load_split_paragraphs(0)[0] == load_split_paragraphs_inputs(0)[1]
 # %%

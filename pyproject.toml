@@ -46,6 +46,11 @@ wtpsplit = ">=2.1.0"
 einops = "^0.8.1"
 wandb = "^0.19.8"
 welford-torch = "^0.2.5"
+seaborn = "^0.13.2"
+sentence-transformers = "^3.4.1"
+plotly = "^6.0.0"
+openai = "^1.66.3"
+python-dotenv = "^1.0.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"

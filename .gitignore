@@ -1,0 +1,7 @@
+wandb/
+__pycache__/
+data/checkpoints/
+data/
+figures/
+.venv/
+.qodo

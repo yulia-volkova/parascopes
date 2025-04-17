@@ -63,3 +63,26 @@ for i in range(100):
 
 
 # %%
+# convert split paragraphs into tokens
+from utils_sonar import load_sonar_tokenizer
+import json
+from tqdm import tqdm
+
+def load_tokenizer():
+    return load_sonar_tokenizer("text_sonar_basic_encoder").create_encoder()
+tokenizer = load_tokenizer()
+
+for i in tqdm(range(100)):
+    with open(f"../data/split_paragraphs/paragraphs_{i:03d}.json", "r") as f:
+        paragraphs = json.load(f)
+    tokens = []
+    for paragraph in paragraphs:
+        tokens.append(tokenizer(paragraph))
+    # Use pickle instead of json for tokenized data as it may contain non-serializable objects
+    import pickle
+    with open(f"../data/split_paragraphs/paragraphs_tokenized_sonar_{i:03d}.pkl", "wb") as f:
+        pickle.dump(tokens, f)
+
+# %%
+
+

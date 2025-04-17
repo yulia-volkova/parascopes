@@ -1,9 +1,11 @@
+# %% load up a model
 import textwrap
 from termcolor import colored
 from argparse import ArgumentParser
 import torch
-from utils_load_data import load_embeds, load_res_data
+from utils_load_data import load_embeds, load_res_data, load_res_data_layer
 from utils_train import Trainer  # Assumption: You have a Trainer class with loading functionality
+from utils_train_layer import Trainer as TrainerLayer
 
 NUM_COPIES = 1
 #PREFIX = "sonar-sweeps"
@@ -13,8 +15,12 @@ def main():
     parser = ArgumentParser(description='Test the model')
     parser.add_argument('wandb_run_name', type=str,
                        help='Name of the W&B run to load (e.g., northern-sweep-37)')
+    parser.add_argument('-l', '--layer', action='store_true', default=False)
     args = parser.parse_args()
-    model = Trainer.load_from_wandb(PREFIX+"/"+args.wandb_run_name)
+    if args.layer:
+        model = TrainerLayer.load_from_wandb(PREFIX+"/"+args.wandb_run_name)
+    else:
+        model = Trainer.load_from_wandb(PREFIX+"/"+args.wandb_run_name)
     return model
 
 if __name__ == "__main__":
@@ -29,7 +35,10 @@ if __name__ == "__main__":
     # Example usage with the vec2text_model
     with torch.no_grad():
         embeds = load_embeds(99)
-        res_data = load_res_data(99, groups_to_load=trainer.c.groups_to_load)
+        if hasattr(trainer.c, 'chosen_layer'):
+            res_data = load_res_data_layer(99, trainer.c.chosen_layer, group_size=trainer.c.group_size, group_operation=trainer.c.group_operation)
+        else:
+            res_data = load_res_data(99, group_size=trainer.c.group_size, groups_to_load=trainer.c.groups_to_load, group_operation=trainer.c.group_operation)
         for index in [1, 42, 100, 200, 300, 500, 800, 1000, 1234, 2345, 3456]:
             prev_emb = embeds[index-1].unsqueeze(dim=0).to(DEVICE)
             orig_emb   = embeds[index].unsqueeze(dim=0).to(DEVICE)

@@ -7,7 +7,7 @@ import torch
 import wandb
 from types import SimpleNamespace
 from torch.utils.data import DataLoader, TensorDataset
-from utils_models  import Linear, MLP
+from utils_models  import Linear, MLP, ScaledLinear
 from utils_welford import load_or_compute_welford_stats, Normalizer
 from utils_load_data import load_res_data, load_embeds, load_split_paragraphs
 from utils_sonar import SonarDecoderCELoss
@@ -18,11 +18,12 @@ class Trainer:
         self._config = config
         self.device = device
 
-        welford_data = load_or_compute_welford_stats(self.c.groups_to_load)
+        self._config["group_operation"] = "cat" if "group_operation" not in self._config else self._config["group_operation"]
+        welford_data = load_or_compute_welford_stats(self.c.groups_to_load, self.c.group_size, self.c.group_operation)
         self.normalizer_emb: Normalizer = welford_data.norm_emb
         self.normalizer_res: Normalizer = welford_data.norm_res
 
-        d_res = load_res_data(0, self.c.group_size, self.c.groups_to_load).shape[-1]
+        d_res = load_res_data(0, self.c.group_size, self.c.groups_to_load, self.c.group_operation).shape[-1]
         self._config["d_res"] = d_res
 
         # Initialize model
@@ -52,7 +53,9 @@ class Trainer:
         return SimpleNamespace(**self._config)
 
     def _init_model(self):
-        if self.c.model_type == 'linear':
+        if self.c.model_type == 'scaled_linear':
+            return ScaledLinear(self.c)
+        elif self.c.model_type == 'linear':
             return Linear(self.c)
         elif self.c.model_type == 'mlp':
             return MLP(self.c)
@@ -60,7 +63,7 @@ class Trainer:
             raise ValueError(f"Unknown model type: {self.c.model_type}")
 
     def create_data_loader(self, file_idx, shuffle=False):
-        res_data = load_res_data(file_idx, groups_to_load=self.c.groups_to_load)
+        res_data = load_res_data(file_idx, groups_to_load=self.c.groups_to_load, group_operation=self.c.group_operation)
         embeds = load_embeds(file_idx)
         paragraphs = load_split_paragraphs(file_idx)
         indices = torch.arange(len(paragraphs))
@@ -120,6 +123,9 @@ class Trainer:
                     "batch": f"{curr_batch}/{num_batches}",
                     **{k:(v/train_batches) for k,v in train_losses.items()},
                 })
+
+                if hasattr(self.model, "normalize"):
+                    self.model.normalize()
 
                 del x, y, texts, loss, loss_data
 
@@ -213,7 +219,8 @@ class Trainer:
         run_id = run.id
         print(run, run.config)
         model_type = run.config['model_type']
-        filename = f"../data/checkpoints/sweeps/{run_id}_{model_type}.pkl"
+        operations = run.config['group_operation']
+        filename = f"./checkpoints/sweeps/{run_id}_{model_type}_{operations}.pkl"
 
         if not os.path.exists(filename):
             raise FileNotFoundError(f"Checkpoint file not found: {filename}")

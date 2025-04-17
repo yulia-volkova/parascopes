@@ -7,15 +7,24 @@ from tqdm import tqdm
 torch.set_grad_enabled(False)
 
 # %%
-DATASET_FILE = '/workspace/SPAR/gen-dataset/split_indexed_dataset.jsonl'
-with open(DATASET_FILE, 'r') as file:
-    dataset = [json.loads(line) for line in file]
+model = "gemma-27b"
+
+if model == "llama-3b":
+    DATASET_FILE = '/workspace/SPAR/gen-dataset/split_indexed_dataset.jsonl'
+    with open(DATASET_FILE, 'r') as file:
+        dataset = [json.loads(line) for line in file]
+    m = Model("meta-llama/Llama-3.2-3B-Instruct", dtype="hqq8", limit=64000)
+
+elif model == "gemma-27b":
+    from datasets import load_dataset
+    dataset = load_dataset("nickypro/fineweb-gemma27b-regen")["train"]
+    m = Model("google/gemma-3-27b-it", dtype="hqq4", device_map="cuda", limit=8000)
+
+else:
+    raise ValueError(f"Model {model} not supported")
 
 print("Dataset loaded:", len(dataset))
 print(dataset[0])
-
-
-m = Model("meta-llama/Llama-3.2-3B-Instruct", dtype="hqq8", limit=64000)
 
 
 # %%

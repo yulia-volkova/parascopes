@@ -33,10 +33,10 @@ class WelfordData:
     norm_res: Normalizer
     norm_emb: Normalizer
 
-def load_or_compute_welford_stats(groups_to_load):
+def load_or_compute_welford_stats(groups_to_load, group_size, group_operation):
     """Load or compute Welford statistics for normalization"""
     os.makedirs('../data/welford_data', exist_ok=True)
-    welford_file = f'../data/welford_data/welford_stats_10_{groups_to_load}.pkl'
+    welford_file = f'../data/welford_data/welford_stats_10_{groups_to_load}_{group_size}_{group_operation}.pkl'
 
     try:
         with open(welford_file, 'rb') as f:
@@ -48,8 +48,8 @@ def load_or_compute_welford_stats(groups_to_load):
         welford_emb = Welford()
         welford_res = Welford()
 
-        for i in tqdm(range(10)):
-            res_data = load_res_data(i, groups_to_load=groups_to_load).cuda()
+        for i in tqdm(range(10), desc="Loading welford stats"):
+            res_data = load_res_data(i, groups_to_load=groups_to_load, group_size=group_size, group_operation=group_operation).cuda()
             embeds = load_embeds(i).cuda()
 
             batch_size = 1000

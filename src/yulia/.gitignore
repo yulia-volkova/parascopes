@@ -1,0 +1,16 @@
+# Results and experiment outputs
+outlines/results/
+outlines/plots/
+
+# Old CSV files that should be moved to results
+outlines/*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+*.ipynb_checkpoints*

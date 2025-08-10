@@ -9,6 +9,17 @@ metrics.py
 This module implements evaluation metrics for comparing generated outlines
 against their source completions. The goal is to measure how well an outline
 captures the main ideas of the completion while staying concise and avoiding redundancy.
+
+
+Recall (Coverage) measures: "What percentage of the important sentences from the original text are captured in the outline?"
+Takes the top-k most important sentences from the original text (using pick_key_sentences)
+For each key sentence, checks if there's at least one outline bullet point that is semantically similar to it (similarity ≥ 0.72)
+Higher recall means your outline didn't miss important points from the text
+
+Precision (Accuracy) measures: "What percentage of outline bullet points actually correspond to important content in the text?"
+For each bullet point in your outline
+Checks if there's at least one key sentence from the text that is semantically similar to it (similarity ≥ 0.72)
+Higher precision means your outline points are relevant and not making things up
 """
 
 
@@ -36,11 +47,16 @@ def embed_norm(texts: List[str]) -> np.ndarray:
     E = EMB.encode(texts, normalize_embeddings=True)
     return E
 
+
+
+# - position (earlier sentences get some bias)
 def positional_bias(n: int, lam: float = 0.12) -> np.ndarray:
     idx = np.arange(n)
     w = np.exp(-lam * idx)
     return w / (w.max() + 1e-12)
 
+
+# - centrality (how well it represents the overall text)
 def centrality_scores(sent_embs: np.ndarray) -> np.ndarray:
     if len(sent_embs) == 0: return np.array([])
     centroid = sent_embs.mean(axis=0, keepdims=True)
@@ -48,12 +64,14 @@ def centrality_scores(sent_embs: np.ndarray) -> np.ndarray:
     sims = (sent_embs @ centroid.T).ravel()
     return sims
 
+
+# balances between selecting relevant sentences and ensuring they're diverse from each other
 def mmr_select(cand_embs: np.ndarray, doc_emb: np.ndarray, k: int, lambda_mm: float = 0.5) -> List[int]:
     if len(cand_embs) == 0 or k <= 0: return []
     k = min(k, len(cand_embs))
     selected = []
-    sim_doc = cand_embs @ doc_emb
-    sim_mat = cand_embs @ cand_embs.T
+    sim_doc = cand_embs @ doc_emb  # similarity to overall document
+    sim_mat = cand_embs @ cand_embs.T  # similarity between candidates
     while len(selected) < k:
         if not selected:
             i = int(np.argmax(sim_doc))
@@ -69,6 +87,7 @@ def mmr_select(cand_embs: np.ndarray, doc_emb: np.ndarray, k: int, lambda_mm: fl
     return selected
 
 
+# top_k - how many important sentences we extract from original completion
 def pick_key_sentences(completion: str, top_k: int = 5, lead_bias: float = 0.35, lambda_mm: float = 0.5) -> Tuple[List[str], np.ndarray]:
     sents = split_sentences(completion)
     if not sents: return [], np.zeros((0, 384))
@@ -84,15 +103,20 @@ def pick_key_sentences(completion: str, top_k: int = 5, lead_bias: float = 0.35,
     return picked, S[cand_idx][sel]
 
 
-def semantic_prf1(completion: str, outline_md: str, top_k: int = 5, sim_threshold: float = 0.72, lead_bias: float = 0.35, lambda_mm: float = 0.5) -> Dict[str, float]:
-    key_sents, key_embs = pick_key_sentences(completion, top_k=top_k, lead_bias=lead_bias, lambda_mm=lambda_mm)
+def semantic_prf1(completion: str, outline_md: str, top_k: int = 10, sim_threshold: float = 0.72) -> Dict[str, float]:
+    # Step 1: Get key sentences using MMR
+    key_sents, key_embs = pick_key_sentences(completion, top_k=top_k)
+    
+    # Step 2: Get outline bullet points
     bullets = extract_outline_bullets(outline_md)
-    if not key_sents or not bullets:
-        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+    
+    # Step 3: Compare them using similarity matrix
     B = embed_norm(bullets)
-    S = key_embs @ B.T
-    recall = float((S.max(axis=1) >= sim_threshold).mean())
-    precision = float((S.max(axis=0) >= sim_threshold).mean())
+    S = key_embs @ B.T  # Creates similarity matrix between key sentences and bullets
+    
+    # Step 4: Calculate metrics
+    recall = float((S.max(axis=1) >= sim_threshold).mean())    # For each key sentence
+    precision = float((S.max(axis=0) >= sim_threshold).mean()) # For each bullet point
     f1 = 0.0 if (precision + recall) == 0 else 2 * (precision * recall) / (precision + recall)
     return {"precision": precision, "recall": recall, "f1": f1}
 
@@ -100,7 +124,7 @@ def semantic_prf1(completion: str, outline_md: str, top_k: int = 5, sim_threshol
 def conciseness_ratio(completion: str, outline_md: str) -> float:
     return len(outline_md) / max(1, len(completion))
 
-
+#Not repeating the same points in different words
 def redundancy_score(outline_md: str) -> float:
     bullets = extract_outline_bullets(outline_md)
     if len(bullets) < 2: return 0.0

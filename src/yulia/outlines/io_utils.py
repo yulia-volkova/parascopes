@@ -8,17 +8,49 @@ from yulia.outlines.config  import (
     OUTLINE_PROMPT_RULES,
     OUTLINE_TEMPERATURE,
     OUTLINE_MAX_TOKENS,
+    N_SAMPLES,  # Import N_SAMPLES from config
 )
 
 # ===== Dataset Loader =====
-def load_sample(dataset_name: str, split: str, n: int, seed: int = 123) -> List[Dict]:
+def load_sample(
+    dataset_name: str, 
+    split: str, 
+    n: int = None, 
+    start_idx: int = 0,
+    seed: int = None
+) -> List[Dict]:
     """
-    Load a sample of N items from a HuggingFace dataset.
-    Each item must have 'prompt' and 'completion' fields.
+    Load items from a HuggingFace dataset.
+    
+    Args:
+        dataset_name: Name of the dataset on HuggingFace
+        split: Dataset split to use
+        n: Number of items to load (None = all remaining items after start_idx)
+        start_idx: Start from this index in the dataset
+        seed: If provided, shuffle the dataset with this seed
+    
+    Returns:
+        List of dicts with 'prompt', 'completion', and 'dataset_idx' fields
     """
     ds = load_dataset(dataset_name, split=split)
-    sampled = ds.shuffle(seed=seed).select(range(n))
-    return [{"prompt": ex["prompt"], "completion": ex["completion"]} for ex in sampled]
+    
+    if seed is not None:
+        # If seed provided, shuffle but keep track of original indices
+        ds = ds.add_column("dataset_idx", range(len(ds)))
+        ds = ds.shuffle(seed=seed)
+    else:
+        # Otherwise use sequential indices
+        ds = ds.add_column("dataset_idx", range(len(ds)))
+    
+    # Select range to process
+    samples_to_load = n if n is not None else N_SAMPLES  # Use config N_SAMPLES as default
+    ds = ds.select(range(start_idx, min(start_idx + samples_to_load, len(ds))))
+    
+    return [{
+        "prompt": ex["prompt"],
+        "completion": ex["completion"],
+        "dataset_idx": ex["dataset_idx"]  # Original index in dataset
+    } for ex in ds]
 
 # ===== Outline Generation =====
 

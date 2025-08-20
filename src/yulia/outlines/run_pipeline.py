@@ -6,7 +6,6 @@ import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from tqdm import tqdm
-
 from yulia.outlines.io_utils import load_sample, extract_outline_for_model
 from yulia.outlines.config import (
     MODELS, HF_DATASET, HF_SPLIT, N_SAMPLES, RESULTS_DIR,
@@ -94,16 +93,17 @@ def generate_embeddings(
             
     return torch.cat(all_embeddings, dim=0)
 
+# here we work with samples of original dataset "nickypro/fineweb-llama3b-regen"
 def process_batch(
     batch_samples: List[Dict],
     batch_id: int,
     text2vec: Optional[TextToEmbeddingModelPipeline],
     vec2text: Optional[EmbeddingToTextModelPipeline],
-    run_dir: Path,
     version: str,
     with_reconstruction: bool = False,
     batch_size: int = 32,
-    total_processed: int = 0
+    total_processed: int = 0,
+    start_idx: Optional[int] = None
 ) -> Tuple[List[Dict], Optional[torch.Tensor]]:
     """Process a batch of samples, generating outlines and optionally embeddings"""
     rows = []
@@ -111,21 +111,31 @@ def process_batch(
     embedding_map = {}  # Maps outline position to row index
     
     for i, ex in enumerate(batch_samples):
-        example_id = total_processed + i
-        prompt = ex["prompt"]
+        # Debug print to see what we're getting
+        print(f"Processing sample: index={i}, dataset_idx={ex['dataset_idx']}, start_idx={start_idx}")
+        
+        # example_id is our processing index (which example we're processing)
+        # If start_idx not provided, start from 0
+        current_start_idx = 0 if start_idx is None else start_idx
+        example_id = current_start_idx + total_processed + i
+        
+        # dataset_idx is the original position in the dataset
+        dataset_idx = ex["dataset_idx"]
+        print(f"Processing: example_id={example_id} (our count), dataset_idx={dataset_idx} (original position)")
+        
         completion = ex["completion"]
         
         for model_idx, model in enumerate(MODELS):
+            # here we create outline using API call
             outline, used_prompt = extract_outline_for_model(model, completion)
             
             row_data = {
-                "example_id": example_id,
+                "example_id": example_id,        # Our processing count (0, 1, 2, etc.)
+                "dataset_idx": dataset_idx,      # Original position in dataset
                 "model": model,
-                "prompt": prompt,
                 "completion": completion,
-                "outline_prompt_used": used_prompt,
                 "outline_generated": outline,
-                "reconstructed_text": None  # Will be filled later if reconstruction is enabled
+                "reconstructed_text": ""         # Always string type, empty if no reconstruction
             }
             
             if text2vec is not None:
@@ -134,8 +144,9 @@ def process_batch(
                 outlines_for_embedding.append(outline)
                 embedding_map[outline_pos] = len(rows)  # Map position to row index
                 
-                # Add embedding_id that will map to the saved tensor
-                row_data["embedding_id"] = total_processed * len(MODELS) + len(rows)
+                # embedding_id should match example_id so we can map embeddings back to examples
+                row_data["embedding_id"] = example_id
+                print(f"  - Created row with example_id={example_id}, dataset_idx={dataset_idx}, embedding_id={example_id}")
             
             rows.append(row_data)
     
@@ -153,24 +164,26 @@ def process_batch(
             # Add reconstructed text to rows
             for i, row_idx in enumerate(embedding_map.values()):
                 rows[row_idx]["reconstructed_text"] = reconstructed_texts[i]
+                
         
-        # Save this batch of embeddings
-        from yulia.outlines.hf_utils import save_embeddings_chunk
-        chunk_path = save_embeddings_chunk(embeddings, batch_id, run_dir, version)
-        print(f"Saved {len(outlines_for_embedding)} embeddings to {os.path.basename(chunk_path)}")
-    
-    return rows, embeddings
+    return rows, embeddings  # Return both rows and embeddings
 
 def generate_outlines(
     samples: List[Dict],
-    run_dir: Path,
     version: str,
     with_embeddings: bool = False,
     with_reconstruction: bool = False,
     text2vec: Optional[TextToEmbeddingModelPipeline] = None,
     vec2text: Optional[EmbeddingToTextModelPipeline] = None,
     batch_size: int = 32,
-    process_batch_size: int = 100  # Number of outlines to make in each batch
+    process_batch_size: int = 100,  # Number of outlines to make in each batch
+    save_local: bool = True, 
+    save_to_hub: bool = False,  
+    version_dir: Optional[Path] = None,  # Directory for local files
+    progress: Optional['ProgressTracker'] = None,  # Progress tracker instance
+    start_chunk_id: Optional[int] = None,  # Starting chunk ID (if None, use progress tracker)
+    items_per_chunk: int = 1000,  # Number of items to store in each chunk file
+    start_idx: Optional[int] = None  # Starting index for processing
 ) -> pd.DataFrame:
     if with_embeddings and text2vec is None:
         raise ValueError("text2vec must be provided when with_embeddings=True")
@@ -185,42 +198,103 @@ def generate_outlines(
     total_processed = 0
     
     # Process samples in batches
-    for batch_id, batch_start in enumerate(range(0, len(samples), process_batch_size)):
+    for batch_idx, batch_start in enumerate(range(0, len(samples), process_batch_size)):
         batch_end = min(batch_start + process_batch_size, len(samples))
         batch = samples[batch_start:batch_end]
         
-        print(f"\nProcessing batch {batch_id + 1} ({batch_start + 1}-{batch_end} of {len(samples)})")
+        print(f"\nProcessing batch {batch_idx + 1} ({batch_start + 1}-{batch_end} of {len(samples)})")
         
         # Process this batch
-        batch_rows, _ = process_batch(
+        batch_rows, batch_embeddings = process_batch(
             batch_samples=batch,
-            batch_id=batch_id,
+            batch_id=batch_idx,
             text2vec=text2vec if with_embeddings else None,
             vec2text=vec2text if with_embeddings else None,
-            run_dir=run_dir,
             version=version,
             with_reconstruction=with_reconstruction,
             batch_size=batch_size,
-            total_processed=total_processed
+            total_processed=total_processed,
+            start_idx=start_idx
         )
         
         all_rows.extend(batch_rows)
         total_processed += len(batch)
         
-        # Create a temporary DataFrame for this batch
+        # Create DataFrame for this batch
         batch_df = pd.DataFrame(batch_rows)
         
-        # Save intermediate results
-        temp_csv = run_dir / f"outlines_temp_{batch_id:03d}.csv"
-        batch_df.to_csv(temp_csv, index=False)
-        print(f"Saved intermediate results to {temp_csv}")
+        # Save locally if requested
+        if save_local:
+            # Calculate which chunk this batch belongs to based on total items processed
+            current_chunk = total_processed // items_per_chunk
+            
+            # Save data
+            data_dir = version_dir / "data"
+            chunk_file = data_dir / f"chunk_{current_chunk:03d}.csv"
+            
+            # Check if we should append to existing chunk
+            if chunk_file.exists():
+                # Read existing chunk
+                existing_df = pd.read_csv(chunk_file)
+                # Append new data
+                combined_df = pd.concat([existing_df, batch_df], ignore_index=True)
+                # Save back
+                combined_df.to_csv(chunk_file, index=False)
+                print(f"Appended to chunk_{current_chunk:03d}.csv - now contains {len(combined_df)} items")
+            else:
+                # Create new chunk file
+                batch_df.to_csv(chunk_file, index=False)
+                print(f"Created new chunk_{current_chunk:03d}.csv with {len(batch_df)} items")
+            
+            # Print current chunk info
+            if chunk_file.exists():
+                existing_df = pd.read_csv(chunk_file)
+                print(f"Current chunk has {existing_df['example_id'].nunique()} samples (example_ids: {existing_df['example_id'].unique()})")
+            
+            # Save embeddings if present
+            if batch_embeddings is not None:
+                emb_dir = version_dir / "embeddings"
+                emb_dir.mkdir(exist_ok=True)
+                emb_file = emb_dir / f"chunk_{current_chunk:03d}.pt"
+                
+                if emb_file.exists():
+                    # Load and concatenate embeddings
+                    existing_emb = torch.load(emb_file)
+                    combined_emb = torch.cat([existing_emb, batch_embeddings], dim=0)
+                    torch.save(combined_emb, emb_file)
+                else:
+                    torch.save(batch_embeddings, emb_file)
+        
+        # Upload to HuggingFace if requested
+        if save_to_hub:
+            from yulia.outlines.hf_utils import save_to_hub
+            hub_url = save_to_hub(
+                df=batch_df,
+                embeddings=batch_embeddings,
+                repo_id=HF_REPO_ID,
+                version=version,
+                chunk_id=current_chunk,  # Use the same chunk ID as local files
+                private=HF_PRIVATE,
+                items_per_chunk=items_per_chunk,
+                with_reconstruction=with_reconstruction
+            )
+            print(f"Batch uploaded to: {hub_url}")
+        
     
-    # Combine all batches into final DataFrame
+    # Create final DataFrame
     df = pd.DataFrame(all_rows).sort_values(["example_id", "model"]).reset_index(drop=True)
     
-    # Clean up temporary files
-    for temp_file in run_dir.glob("outlines_temp_*.csv"):
-        temp_file.unlink()
+    # Update final progress
+    if progress is not None:
+        # Get total completed samples from DataFrame
+        total_completed = df['example_id'].nunique()
+        last_chunk = total_completed // items_per_chunk
+        
+        print(f"\nFinal progress update: {total_completed} samples completed")
+        progress.update_progress(
+            completed_samples=total_completed,
+            chunk_idx=last_chunk
+        )
     
     return df
 
@@ -232,7 +306,11 @@ def main(
     with_reconstruction: bool = False,
     batch_size: int = SONAR_BATCH_SIZE,
     process_batch_size: int = PROCESS_BATCH_SIZE,
-    save_to_hub: bool = False
+    save_to_hub: bool = False,
+    save_local: bool = True,  # Whether to keep local copies
+    start_idx: int = None,    # Start from this sample index
+    n_samples: int = None,    # Process this many samples
+    items_per_chunk: int = 1000  # Number of items to store in each chunk file
 ):
     print("Starting outline pipeline...", flush=True)
     print(f"Config:", flush=True)
@@ -245,10 +323,25 @@ def main(
     if not os.environ.get("DEEPINFRA_API_KEY"):
         print("DEEPINFRA_API_KEY is NOT set — API calls will fail.", flush=True)
 
-    # Create run directory first
-    from yulia.outlines.hf_utils import create_run_dir
-    run_dir, _ = create_run_dir(Path(RESULTS_DIR), version)
-    print(f"Created run directory: {run_dir}")
+    # Create run directory and initialize progress tracking
+    from yulia.outlines.progress import ProgressTracker
+    
+    # Create minimal directory structure for progress tracking
+    version_dir = Path(RESULTS_DIR) / f"v{version}"
+    version_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create data/embeddings directories only if we're saving locally
+    if save_local:
+        (version_dir / "data").mkdir(exist_ok=True)
+        if with_embeddings:
+            (version_dir / "embeddings").mkdir(exist_ok=True)
+    
+    # Initialize progress tracking
+    progress = ProgressTracker(version_dir)
+    if start_idx is None:
+        start_idx = progress.get_next_start_index()
+    print(f"Starting from sample index: {start_idx}")
+    print(f"Current progress: {progress.get_completion_status()}")
 
     # Initialize SONAR if needed
     text2vec = None
@@ -258,47 +351,59 @@ def main(
         text2vec, vec2text = init_sonar()
 
     print("Loading samples…", flush=True)
-    samples = load_sample(HF_DATASET, HF_SPLIT, N_SAMPLES)
-    print(f"Loaded {len(samples)} samples", flush=True)
+    samples = load_sample(
+        dataset_name=HF_DATASET,
+        split=HF_SPLIT,
+        n=n_samples,
+        start_idx=start_idx if start_idx is not None else 0
+    )
+    
+    # Update progress tracker with total samples we'll process in this run
+    # If we're starting from an index, add it to get the true total
+    total_to_process = len(samples)
+    if start_idx is not None:
+        total_to_process += start_idx
+    progress.set_total_samples(total_to_process)
+    print(f"Total samples to process (including previous): {total_to_process}")
+    
+    print(f"Processing dataset indices: {samples[0]['dataset_idx']} to {samples[-1]['dataset_idx']}")
+    
+    print(f"Loaded {len(samples)} samples to process", flush=True)
 
     print("Generating outlines" + (" and embeddings" if with_embeddings else "") + "…", flush=True)
+    # Get starting chunk ID from progress tracker
+    start_chunk_id = None
+    if progress is not None:
+        start_chunk_id = progress.get_next_chunk_index()
+    
     df = generate_outlines(
         samples=samples,
-        run_dir=run_dir,
         version=version,
         with_embeddings=with_embeddings,
         with_reconstruction=with_reconstruction,
         text2vec=text2vec,
         vec2text=vec2text,
         batch_size=batch_size,
-        process_batch_size=process_batch_size
+        process_batch_size=process_batch_size,
+        save_local=save_local,
+        save_to_hub=save_to_hub,
+        version_dir=version_dir,
+        progress=progress,
+        start_chunk_id=start_chunk_id,
+        items_per_chunk=items_per_chunk
     )
     
     print("Saving final results...", flush=True)
     
-    if save_to_hub:
-        from yulia.outlines.hf_utils import save_to_hub
-        # Get all embeddings from saved chunks
-        all_embeddings = []
-        for chunk_file in sorted((run_dir / "sonar_embeds").glob("chunk_*.pt")):
-            all_embeddings.append(torch.load(chunk_file))
-        embeddings = torch.cat(all_embeddings, dim=0)
-        
-        # Save to HuggingFace
-        hub_url = save_to_hub(
-            df=df,
-            embeddings=embeddings,
-            repo_id=HF_REPO_ID,
-            version=version,
-            private=HF_PRIVATE
-        )
-        print(f"\nData uploaded to: {hub_url}")
-    else:
-        # Save locally
-        df.to_csv(run_dir / "outlines.csv", index=False)
-        print(f"\nResults saved in: {run_dir}")
-        print(f"- outlines.csv: Main data ({len(df)} rows)")
-        print(f"- sonar_embeds/: Embeddings saved in chunks")
+    print(f"\nProcessing complete!")
+    print(f"- Total samples processed: {len(df)}")
+    print(f"- Version: {version}")
+    
+    if save_local:
+        print(f"\nLocal files saved in: {version_dir}")
+        print(f"- data/: CSV files with outlines")
+        if with_embeddings:
+            print(f"- embeddings/: PyTorch tensor files")
     
     print(f"\nDataFrame shape: {df.shape}")
     print("\nColumns:")
@@ -314,6 +419,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=SONAR_BATCH_SIZE, help="Batch size for SONAR embedding generation")
     parser.add_argument("--process-batch-size", type=int, default=PROCESS_BATCH_SIZE, help="Number of samples to process in each batch")
     parser.add_argument("--save-to-hub", action="store_true", help="Save results directly to HuggingFace Hub")
+    parser.add_argument("--no-local", action="store_true", help="Don't save files locally")
+    parser.add_argument("--start-idx", type=int, help="Start processing from this sample index")
+    parser.add_argument("--n-samples", type=int, help="Process this many samples")
+    parser.add_argument("--items-per-chunk", type=int, default=1000, help="Number of items to store in each chunk file")
     
     args = parser.parse_args()
     
@@ -324,7 +433,11 @@ if __name__ == "__main__":
             with_reconstruction=args.reconstruct,
             batch_size=args.batch_size,
             process_batch_size=args.process_batch_size,
-            save_to_hub=args.save_to_hub
+            save_to_hub=args.save_to_hub,
+            save_local=not args.no_local,
+            start_idx=args.start_idx,
+            n_samples=args.n_samples,
+            items_per_chunk=args.items_per_chunk
         )
     except Exception as e:
         print("Uncaught exception:", e, file=sys.stderr, flush=True)

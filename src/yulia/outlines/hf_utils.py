@@ -1,49 +1,44 @@
-"""Utilities for saving data to HuggingFace Hub."""
 
 import os
+import io
+import json
+import shutil
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 import pandas as pd
 import torch
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from huggingface_hub import HfApi
 from tqdm import tqdm
+from dotenv import load_dotenv
 
-def create_run_dir(results_dir: Path, version: str) -> Tuple[Path, str]:
-    """Create version and run directories, return run_dir and timestamp"""
-    version_dir = results_dir / f"v{version}"
-    version_dir.mkdir(parents=True, exist_ok=True)
-    
-    timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = version_dir / f"run_{timestamp}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create embeddings directory
-    (run_dir / "sonar_embeds").mkdir(exist_ok=True)
-    
-    return run_dir, timestamp
+load_dotenv()
 
-def save_embeddings_chunk(
-    embeddings: torch.Tensor,
-    chunk_id: int,
-    run_dir: Path,
-    version: str
-) -> str:
-    """Save a chunk of embeddings to disk"""
-    emb_dir = run_dir / "sonar_embeds"
-    chunk_file = f"chunk_{chunk_id:03d}.pt"
-    chunk_path = emb_dir / chunk_file
-    
-    torch.save(embeddings.cpu(), chunk_path)
-    return str(chunk_path)
+HF_TOKEN = os.getenv("HF_TOKEN")
+
+
+def get_standard_features():
+    """Get the standard feature schema for our dataset."""
+    from datasets import Features, Value
+    return Features({
+        'example_id': Value('int64'),
+        'dataset_idx': Value('int64'),
+        'model': Value('string'),
+        'completion': Value('string'),
+        'outline_generated': Value('string'),
+        'reconstructed_text': Value('string'),  # Always string, empty if no reconstruction
+        'embedding_id': Value('int64')
+    })
 
 def save_to_hub(
     df: pd.DataFrame,
     embeddings: torch.Tensor,
     repo_id: str,
     version: str,
+    chunk_id: int,
     private: bool = True,
-    chunk_size: int = 1000
+    items_per_chunk: int = 1000,
+    with_reconstruction: bool = False
 ) -> str:
     """
     Save results directly to HuggingFace Hub in chunks.
@@ -53,16 +48,17 @@ def save_to_hub(
         embeddings: Tensor of SONAR embeddings
         repo_id: HuggingFace repository ID (e.g., 'username/dataset-name')
         version: Version string
+        chunk_id: Current chunk number
         private: Whether to create private repository
-        chunk_size: Size of chunks (default 1000)
+        items_per_chunk: Maximum items per chunk (default 1000)
+        with_reconstruction: Whether reconstruction is enabled
         
     Returns:
         URL of the created dataset
     """
-    # Initialize HF API
-    api = HfApi()
+    api = HfApi(token=HF_TOKEN)
     
-    # Create repository if it doesn't exist
+    # Create repo if it doesn't exist
     try:
         api.create_repo(
             repo_id=repo_id,
@@ -72,46 +68,95 @@ def save_to_hub(
         )
     except Exception as e:
         print(f"Note: Repository exists or error occurred: {e}")
+        
+    # Create temporary directories for this batch
+    version_dir = f"v{version}"
+    os.makedirs(f"{version_dir}/data", exist_ok=True)
+    os.makedirs(f"{version_dir}/embeddings", exist_ok=True)
     
-    # Calculate number of chunks
-    n_chunks = (len(df) + chunk_size - 1) // chunk_size
-    print(f"\nSaving {len(df)} samples in {n_chunks} chunks of {chunk_size}")
+    print(f"\nUploading batch {chunk_id} ({len(df)} samples)")
     
-    for i in tqdm(range(n_chunks), desc="Processing chunks"):
-        start_idx = i * chunk_size
-        end_idx = min((i + 1) * chunk_size, len(df))
+    try:
+
+        # Handle embeddings
+        emb_path = f"{version_dir}/embeddings/chunk_{chunk_id:03d}.pt"
         
-        # Get chunk of DataFrame and embeddings
-        df_chunk = df.iloc[start_idx:end_idx].copy()
-        emb_chunk = embeddings[start_idx:end_idx]
+        # Check if embeddings exist
+        try:
+            api.hf_hub_download(
+                repo_id=repo_id,
+                repo_type="dataset",
+                filename=f"v{version}/embeddings/chunk_{chunk_id:03d}.pt",
+                local_dir="."
+            )
+            print(f"Found existing embeddings, concatenating...")
+            existing_emb = torch.load(emb_path)
+            combined_emb = torch.cat([existing_emb, embeddings], dim=0)
+            torch.save(combined_emb, emb_path)
+        except Exception as e:
+            print(f"No existing embeddings found, creating new file...")
+            torch.save(embeddings, emb_path)
         
-        # Save embeddings chunk
-        emb_file = f"embeddings_{version}/chunk_{i:03d}.pt"
-        os.makedirs(os.path.dirname(emb_file), exist_ok=True)
-        torch.save(emb_chunk, emb_file)
-        
-        # Upload embeddings chunk
+        # Upload embeddings
+        print(f"Uploading embeddings...")
         api.upload_file(
-            path_or_fileobj=emb_file,
-            path_in_repo=emb_file,
+            path_or_fileobj=emb_path,
+            path_in_repo=f"v{version}/embeddings/chunk_{chunk_id:03d}.pt",
             repo_id=repo_id,
             repo_type="dataset"
         )
-        os.remove(emb_file)  # Clean up
+        print("✓ Embeddings uploaded successfully")
+        os.remove(emb_path)  # Clean up immediately
         
-        # Convert chunk to HF Dataset and upload
-        hf_dataset = Dataset.from_pandas(df_chunk)
-        print(f"\nUploading chunk {i+1}/{n_chunks} ({len(df_chunk)} samples)...")
-        hf_dataset.push_to_hub(
-            repo_id,
-            split=f"v{version}/chunk_{i:03d}",
-            embed_external_files=True,
-            commit_message=f"Add chunk {i} of version {version}"
+        # Check if chunk exists and has space
+        try:
+            existing_dataset = load_dataset(repo_id, split=f"v{version}.chunk_{chunk_id:03d}", token=HF_TOKEN)
+            if len(existing_dataset) < items_per_chunk:
+                print(f"Found existing chunk with {len(existing_dataset)} items, appending...")
+                # Convert existing dataset to DataFrame
+                existing_df = existing_dataset.to_pandas()
+                # Convert any null values to empty strings
+                existing_df['reconstructed_text'] = existing_df['reconstructed_text'].fillna('')
+                
+                # Append new data
+                combined_df = pd.concat([existing_df, df], ignore_index=True)
+                print(f"Combined chunk will have {len(combined_df)} items")
+                
+                # Convert back to HF dataset using our standard schema
+                hf_dataset = Dataset.from_pandas(combined_df, features=get_standard_features())
+            else:
+                print(f"Chunk {chunk_id} is full ({len(existing_dataset)} items), creating new chunk...")
+                hf_dataset = Dataset.from_pandas(df, features=get_standard_features())
+        except Exception as e:
+            print(f"No existing chunk found, creating new one...")
+            hf_dataset = Dataset.from_pandas(df, features=get_standard_features())
+        
+        # Save data to parquet file
+        print(f"Uploading data...")
+        data_path = f"{version_dir}/data/chunk_{chunk_id:03d}.parquet"
+        hf_dataset.to_parquet(data_path)
+        
+        # Upload data file directly
+        api.upload_file(
+            path_or_fileobj=data_path,
+            path_in_repo=f"v{version}/data/chunk_{chunk_id:03d}.parquet",
+            repo_id=repo_id,
+            repo_type="dataset"
         )
+        print("✓ Data uploaded successfully")
     
-    print(f"\nDataset structure:")
-    print(f"- Text data: {len(df)} samples in {n_chunks} chunks")
-    print(f"- Embeddings: {n_chunks} chunks of {chunk_size}")
-    print(f"- Version: {version}")
+    except Exception as e:
+        print(f"Error uploading batch: {e}")
+        # Clean up on error
+        if os.path.exists(emb_path):
+            os.remove(emb_path)
+        raise
+    finally:
+        # Always clean up the temporary directory
+        shutil.rmtree(version_dir)
+    
+    print(f"\nBatch {chunk_id} complete!")
+    print(f"- Data: {len(df)} samples")
+    print(f"- Embeddings: {embeddings.shape[0]} vectors")
     
     return f"https://huggingface.co/datasets/{repo_id}"

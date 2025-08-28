@@ -46,19 +46,18 @@ def save_to_hub(
     Args:
         df: DataFrame with outlines and metadata
         embeddings: Tensor of SONAR embeddings
-        repo_id: HuggingFace repository ID (e.g., 'username/dataset-name')
+        repo_id: HuggingFace repository ID
         version: Version string
         chunk_id: Current chunk number
         private: Whether to create private repository
         items_per_chunk: Maximum items per chunk (default 1000)
-        with_reconstruction: Whether reconstruction is enabled
+        with_reconstruction: Whether reconstruction from embeddings is enabled
         
     Returns:
         URL of the created dataset
     """
     api = HfApi(token=HF_TOKEN)
     
-    # Create repo if it doesn't exist
     try:
         api.create_repo(
             repo_id=repo_id,
@@ -69,7 +68,7 @@ def save_to_hub(
     except Exception as e:
         print(f"Note: Repository exists or error occurred: {e}")
         
-    # Create temporary directories for this batch
+    # Create temp dirs for this batch
     version_dir = f"v{version}"
     os.makedirs(f"{version_dir}/data", exist_ok=True)
     os.makedirs(f"{version_dir}/embeddings", exist_ok=True)
@@ -78,10 +77,8 @@ def save_to_hub(
     
     try:
 
-        # Handle embeddings
         emb_path = f"{version_dir}/embeddings/chunk_{chunk_id:03d}.pt"
         
-        # Check if embeddings exist
         try:
             api.hf_hub_download(
                 repo_id=repo_id,
@@ -97,7 +94,6 @@ def save_to_hub(
             print(f"No existing embeddings found, creating new file...")
             torch.save(embeddings, emb_path)
         
-        # Upload embeddings
         print(f"Uploading embeddings...")
         api.upload_file(
             path_or_fileobj=emb_path,
@@ -108,7 +104,6 @@ def save_to_hub(
         print("✓ Embeddings uploaded successfully")
         os.remove(emb_path)  # Clean up immediately
         
-        # Check if chunk exists and has space
         try:
             existing_dataset = load_dataset(repo_id, split=f"v{version}.chunk_{chunk_id:03d}", token=HF_TOKEN)
             if len(existing_dataset) < items_per_chunk:
@@ -147,12 +142,11 @@ def save_to_hub(
     
     except Exception as e:
         print(f"Error uploading batch: {e}")
-        # Clean up on error
         if os.path.exists(emb_path):
             os.remove(emb_path)
         raise
     finally:
-        # Always clean up the temporary directory
+        # clean up the temporary directory
         shutil.rmtree(version_dir)
     
     print(f"\nBatch {chunk_id} complete!")

@@ -21,7 +21,6 @@ N_SAMPLES = 200
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-
 VERSION = "1.0"  
 GENERATIONS_CSV = os.path.join(RESULTS_DIR, f"outlines_{VERSION}_n{N_SAMPLES}.csv")
 
@@ -38,14 +37,6 @@ Rules:
 - Short phrases only (no lengthy sentences)
 - Specific to this text (not generic).
 """
-
-
-
-# THRESHOLDS = {
-#     "recall": 0.50,       # target minimum
-#     "conciseness": 0.32,  # target maximum
-#     "redundancy": 0.40    # target maximum
-# }
 
 # API parameters for outline generation
 OUTLINE_TEMPERATURE = 0.2

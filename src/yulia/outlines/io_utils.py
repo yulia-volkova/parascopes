@@ -8,7 +8,7 @@ from yulia.outlines.config  import (
     OUTLINE_PROMPT_RULES,
     OUTLINE_TEMPERATURE,
     OUTLINE_MAX_TOKENS,
-    N_SAMPLES,  # Import N_SAMPLES from config
+    N_SAMPLES, 
 )
 
 # ===== Dataset Loader =====
@@ -43,7 +43,7 @@ def load_sample(
         ds = ds.add_column("dataset_idx", range(len(ds)))
     
     # Select range to process
-    samples_to_load = n if n is not None else N_SAMPLES  # Use config N_SAMPLES as default
+    samples_to_load = n if n is not None else N_SAMPLES  # N_SAMPLES as default
     ds = ds.select(range(start_idx, min(start_idx + samples_to_load, len(ds))))
     
     return [{
@@ -53,7 +53,6 @@ def load_sample(
     } for ex in ds]
 
 # ===== Outline Generation =====
-
 def _api_call(
     model: str,
     system: str,

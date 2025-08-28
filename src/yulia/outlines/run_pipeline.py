@@ -49,7 +49,6 @@ def init_sonar(device: Optional[torch.device] = None, dtype: Optional[torch.dtyp
         return text2vec, vec2text
     except Exception as e:
         print(f"Failed to initialize on {device}, falling back to CPU: {e}")
-        # Fall back to CPU
         device = torch.device("cpu")
         dtype = torch.float32
         text2vec = TextToEmbeddingModelPipeline(
@@ -76,7 +75,6 @@ def generate_embeddings(
     all_embeddings = []
     n_batches = (len(texts) + batch_size - 1) // batch_size
     
-    # Use tqdm for progress if requested
     batch_iter = tqdm(range(0, len(texts), batch_size)) if show_progress else range(0, len(texts), batch_size)
     
     for i in batch_iter:
@@ -111,7 +109,6 @@ def process_batch(
     embedding_map = {}  # Maps outline position to row index
     
     for i, ex in enumerate(batch_samples):
-        # Debug print to see what we're getting
         print(f"Processing sample: index={i}, dataset_idx={ex['dataset_idx']}, start_idx={start_idx}")
         
         # example_id is our processing index (which example we're processing)
@@ -166,7 +163,7 @@ def process_batch(
                 rows[row_idx]["reconstructed_text"] = reconstructed_texts[i]
                 
         
-    return rows, embeddings  # Return both rows and embeddings
+    return rows, embeddings 
 
 def generate_outlines(
     samples: List[Dict],
@@ -204,7 +201,6 @@ def generate_outlines(
         
         print(f"\nProcessing batch {batch_idx + 1} ({batch_start + 1}-{batch_end} of {len(samples)})")
         
-        # Process this batch
         batch_rows, batch_embeddings = process_batch(
             batch_samples=batch,
             batch_id=batch_idx,
@@ -228,7 +224,6 @@ def generate_outlines(
             # Calculate which chunk this batch belongs to based on total items processed
             current_chunk = total_processed // items_per_chunk
             
-            # Save data
             data_dir = version_dir / "data"
             chunk_file = data_dir / f"chunk_{current_chunk:03d}.csv"
             
@@ -265,7 +260,7 @@ def generate_outlines(
                 else:
                     torch.save(batch_embeddings, emb_file)
         
-        # Upload to HuggingFace if requested
+        # Upload to HF if requested
         if save_to_hub:
             from yulia.outlines.hf_utils import save_to_hub
             hub_url = save_to_hub(
@@ -281,7 +276,7 @@ def generate_outlines(
             print(f"Batch uploaded to: {hub_url}")
         
     
-    # Create final DataFrame
+    # Create final df
     df = pd.DataFrame(all_rows).sort_values(["example_id", "model"]).reset_index(drop=True)
     
     # Update final progress
@@ -326,24 +321,20 @@ def main(
     # Create run directory and initialize progress tracking
     from yulia.outlines.progress import ProgressTracker
     
-    # Create minimal directory structure for progress tracking
     version_dir = Path(RESULTS_DIR) / f"v{version}"
     version_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create data/embeddings directories only if we're saving locally
     if save_local:
         (version_dir / "data").mkdir(exist_ok=True)
         if with_embeddings:
             (version_dir / "embeddings").mkdir(exist_ok=True)
     
-    # Initialize progress tracking
     progress = ProgressTracker(version_dir)
     if start_idx is None:
         start_idx = progress.get_next_start_index()
     print(f"Starting from sample index: {start_idx}")
     print(f"Current progress: {progress.get_completion_status()}")
 
-    # Initialize SONAR if needed
     text2vec = None
     vec2text = None
     if with_embeddings:

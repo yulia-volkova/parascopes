@@ -10,18 +10,18 @@ MODELS = [
     "meta-llama/Llama-3.3-70B-Instruct"
 ]
 
-# HuggingFace configuration
-HF_DATASET = "nickypro/fineweb-llama3b-regen"
+# HuggingFace original source data config
+HF_DATASET = "annnettte/fineweb-llama3b-texts"
 HF_SPLIT = "train"
 HF_REPO_ID = os.getenv("HF_REPO_ID", "yulia-volkova/parascopes-outlines-data")  
 HF_PRIVATE = True  
 
-N_SAMPLES = 200
+N_SAMPLES = 5000
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-VERSION = "1.0"  
+VERSION = "5.0"  
 GENERATIONS_CSV = os.path.join(RESULTS_DIR, f"outlines_{VERSION}_n{N_SAMPLES}.csv")
 
 

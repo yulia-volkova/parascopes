@@ -1,58 +1,14 @@
 import time
 import requests
-from typing import List, Dict, Tuple
-from datasets import load_dataset
+from typing import Tuple
 from yulia.outlines.config  import (
     DEEPINFRA_API_KEY,
     DEEPINFRA_API_URL,
     OUTLINE_PROMPT_RULES,
     OUTLINE_TEMPERATURE,
     OUTLINE_MAX_TOKENS,
-    N_SAMPLES, 
 )
 
-# ===== Dataset Loader =====
-def load_sample(
-    dataset_name: str, 
-    split: str, 
-    n: int = None, 
-    start_idx: int = 0,
-    seed: int = None
-) -> List[Dict]:
-    """
-    Load items from a HuggingFace dataset.
-    
-    Args:
-        dataset_name: Name of the dataset on HuggingFace
-        split: Dataset split to use
-        n: Number of items to load (None = all remaining items after start_idx)
-        start_idx: Start from this index in the dataset
-        seed: If provided, shuffle the dataset with this seed
-    
-    Returns:
-        List of dicts with 'prompt', 'completion', and 'dataset_idx' fields
-    """
-    ds = load_dataset(dataset_name, split=split)
-    
-    if seed is not None:
-        # If seed provided, shuffle but keep track of original indices
-        ds = ds.add_column("dataset_idx", range(len(ds)))
-        ds = ds.shuffle(seed=seed)
-    else:
-        # Otherwise use sequential indices
-        ds = ds.add_column("dataset_idx", range(len(ds)))
-    
-    # Select range to process
-    samples_to_load = n if n is not None else N_SAMPLES  # N_SAMPLES as default
-    ds = ds.select(range(start_idx, min(start_idx + samples_to_load, len(ds))))
-    
-    return [{
-        "prompt": ex["prompt"],
-        "completion": ex["completion"],
-        "dataset_idx": ex["dataset_idx"]  # Original index in dataset
-    } for ex in ds]
-
-# ===== Outline Generation =====
 def _api_call(
     model: str,
     system: str,

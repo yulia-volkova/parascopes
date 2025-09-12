@@ -67,6 +67,10 @@ def upload_to_hub(df: pd.DataFrame, repo_id: str, version: str) -> None:
     api = HfApi()
     CHUNK_SIZE = 100000  # 100k samples per parquet
     
+    # Create local results directory
+    local_dir = Path(os.path.dirname(__file__)) / "results" / "gemma27b" / f"v{version}"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    
     try:
         api.create_repo(repo_id=repo_id, repo_type="dataset", private=HF_PRIVATE, exist_ok=True)
     except Exception as e:
@@ -137,20 +141,29 @@ def upload_to_hub(df: pd.DataFrame, repo_id: str, version: str) -> None:
                 chunk_df = chunk_df.drop('__index_level_0__', axis=1)
             hf_dataset = Dataset.from_pandas(chunk_df, features=get_standard_features())
             
-            # Save and upload
-            data_path = f"v{version}/data/outlines_{current_chunk:03d}.parquet"
-            os.makedirs(os.path.dirname(data_path), exist_ok=True)
-            hf_dataset.to_parquet(data_path)
+            # Save locally and to HF
+            hf_data_path = f"v{version}/data/outlines_{current_chunk:03d}.parquet"
+            local_data_path = local_dir / f"outlines_{current_chunk:03d}.parquet"
             
+            # Save locally
+            os.makedirs(os.path.dirname(hf_data_path), exist_ok=True)  # For HF upload
+            hf_dataset.to_parquet(hf_data_path)
+            
+            # Also save to local results
+            hf_dataset.to_parquet(str(local_data_path))
+            print(f"✓ Saved locally to {local_data_path}")
+            
+            # Upload to HF
             api.upload_file(
-                path_or_fileobj=data_path,
-                path_in_repo=data_path,
+                path_or_fileobj=hf_data_path,
+                path_in_repo=hf_data_path,
                 repo_id=repo_id,
                 repo_type="dataset"
             )
+            print(f"✓ Uploaded chunk_{current_chunk:03d} to HF")
             
-            print(f"✓ Uploaded chunk_{current_chunk:03d}")
-            os.remove(data_path)
+            # Clean up HF temp file
+            os.remove(hf_data_path)
         
         current_chunk += 1
 

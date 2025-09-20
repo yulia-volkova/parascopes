@@ -17,7 +17,7 @@ from yulia.outlines.config import (
 )
 from yulia.outlines.hf_utils import get_standard_features
 
-# Conf
+
 NUM_WORKERS = 50  
 BATCH_SIZE = 200 
 
@@ -34,7 +34,7 @@ def process_sample(sample: Dict[str, Any], example_id: int) -> Dict[str, Any]:
         "model": model,
         "completion": completion,
         "outline_generated": outline,
-        "reconstructed_text": "",  # Empty as we'll generate this later with embeddings if we choose to 
+        "reconstructed_text": "",  # Empty, could be filled later to validate embeddings
         "embedding_id": example_id  # Same as example_id for alignment
     }
 
@@ -87,7 +87,7 @@ def upload_to_hub(df: pd.DataFrame, repo_id: str, version: str) -> None:
     
     while current_chunk <= max_id // CHUNK_SIZE:
         chunk_start_id = current_chunk * CHUNK_SIZE
-        # Special handling for final chunk (chunk 9) to allow up to 100,001 items
+        # Special handling for final chunk (chunk 9) to allow up to 100,001 items (not sure if needed though)
         if current_chunk == 9:
             chunk_end_id = min(max_id, 1000000)  # Allow up to 1,000,000 
         else:
@@ -145,11 +145,9 @@ def upload_to_hub(df: pd.DataFrame, repo_id: str, version: str) -> None:
             hf_data_path = f"v{version}/data/outlines_{current_chunk:03d}.parquet"
             local_data_path = local_dir / f"outlines_{current_chunk:03d}.parquet"
             
-            # Save locally
             os.makedirs(os.path.dirname(hf_data_path), exist_ok=True)  # For HF upload
             hf_dataset.to_parquet(hf_data_path)
             
-            # Also save to local results
             hf_dataset.to_parquet(str(local_data_path))
             print(f"✓ Saved locally to {local_data_path}")
             
@@ -171,7 +169,7 @@ def upload_to_hub(df: pd.DataFrame, repo_id: str, version: str) -> None:
 
 def main(
     start_idx: int = 0,
-    end_idx: int = 3,
+    end_idx: int = 3, # for testing
     version: str = VERSION
 ):
     print(f"Starting parallel outline generation pipeline...")

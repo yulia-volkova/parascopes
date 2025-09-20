@@ -1,0 +1,9 @@
+requests
+pandas
+numpy
+sentence-transformers
+datasets
+python-dotenv
+torch
+sonar-space
+einops

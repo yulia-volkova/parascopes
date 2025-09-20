@@ -58,9 +58,7 @@ Outline:
 
 
 def extract_outline_for_model(model: str, completion_text: str, retry: int = 2, sleep: float = 1.0) -> Tuple[str, str]:
-    """
-    Returns (clean_outline_text, outline_prompt_used)
-    """
+
     outline_prompt = build_outline_prompt(completion_text)
 
     system = (

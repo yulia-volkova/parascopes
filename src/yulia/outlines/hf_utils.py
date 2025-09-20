@@ -18,7 +18,6 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 
 def get_standard_features():
-    """Get the standard feature schema for our dataset."""
     from datasets import Features, Value
     return Features({
         'example_id': Value('int64'),

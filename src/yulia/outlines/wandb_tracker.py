@@ -134,8 +134,6 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train the probe with Weights & Biases logging.")
 
     # Core training args (common)
-    p.add_argument("--residuals-path", type=str, required=True)
-    p.add_argument("--hf-repo-id", type=str, required=True)
     p.add_argument("--start-chunk", type=int, default=0)
     p.add_argument("--end-chunk", type=int, default=0)
     p.add_argument("--batch-size", type=int, default=32)
@@ -143,6 +141,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--n-epochs", type=int, default=10)
     p.add_argument("--checkpoint-dir", type=str, default="results/probes")
     p.add_argument("--cpu", action="store_true")
+
+    p.add_argument("--residuals-path", type=str, default=None)  # legacy, ignored by new core
+    p.add_argument("--hf-repo-id", type=str, default=None)      # legacy, ignored by new core
+    p.add_argument("--hf-repo-residuals", type=str, default="nickypro/fineweb-llama3b-residuals")
+    p.add_argument("--hf-repo-embeds", type=str, default="yulia-volkova/llama-3b-outlines-embeddings_new")
+    p.add_argument("--hf-token", type=str, default=os.environ.get("HF_TOKEN"))
+    p.add_argument("--chunks-per-epoch", type=int, default=None,
+                   help="If set, train/val only on this many chunks per epoch, rotating across the range.")
+    p.add_argument("--chunk-seed", type=int, default=42,
+                   help="Seed for shuffling chunk order when using --chunks-per-epoch.")
 
     # Normalization stats subset
     p.add_argument("--norm-chunks", type=int, default=10,
@@ -215,6 +223,10 @@ def _call_train_probe_filtered(args: argparse.Namespace, tracker: WandbTracker):
             kwargs["train_frac"] = args.train_frac
         if "max_cached_chunks" in accepted:
             kwargs["max_cached_chunks"] = args.max_cached_chunks
+        if "chunks_per_epoch" in accepted:
+            kwargs["chunks_per_epoch"] = args.chunks_per_epoch
+        if "chunk_seed" in accepted:
+            kwargs["chunk_seed"] = args.chunk_seed
 
     # Filter to only those actually accepted by the core
     filtered_kwargs = {k: v for k, v in kwargs.items() if k in accepted}

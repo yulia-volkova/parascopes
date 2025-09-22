@@ -1,13 +1,25 @@
-"""Core: Train a linear probe to map from residual streams to SONAR embeddings.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-- Normalization stats (mean/std) are computed on a subset of chunks (default: first 10).
-- Training/validation use a streaming dataset with a tiny LRU chunk cache (no full materialization).
-- Global fixed split: default 90% train, 10% val across ALL selected samples.
-- Pluggable Tracker protocol (NoOp by default). Use a WandbTracker adapter to log to W&B.
 """
+Train a linear probe to map from residual streams to SONAR embeddings.
+
+Key features
+- HF streaming (no full materialization). Residuals from `nickypro/fineweb-llama3b-residuals`,
+  embeddings from `yulia-volkova/llama-3b-outlines-embeddings_new`.
+- Any chunk with residuals OR embeddings length != 1000 is skipped entirely (norm + train/val).
+- Normalization (Welford) computed once on a small subset (`--norm-chunks`).
+- Epoch-wise chunk rotation: use only `--chunks-per-epoch` chunks per epoch, rotating across all chunks
+  in ascending order (no shuffle) until all are seen.
+- Tiny LRU cache: keep at most `--max-cached-chunks` chunks in RAM.
+- Pluggable Tracker protocol; works with your WandbTracker via wandb_tracker.py.
+- Checkpoint resume: `--resume-from` restores model/optim/scheduler and continues with the next epoch.
+"""
+
 import os
 import sys
 import logging
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Tuple
@@ -37,11 +49,12 @@ from huggingface_hub import hf_hub_download
 # -------- config defaults --------
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32
-RESIDUALS_PATH = "/workspace/hdd_cache/tensors/llama-3b"
-HF_REPO_ID = "yulia-volkova/llama-3b-outlines-embeddings_new"
-RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 
-SAMPLES_PER_CHUNK = 1000  # invariant used throughout
+HF_REPO_ID_RESIDUALS = "nickypro/fineweb-llama3b-residuals"
+HF_REPO_ID_EMBEDS = "yulia-volkova/llama-3b-outlines-embeddings_new"
+
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
+SAMPLES_PER_CHUNK = 1000  # invariant
 
 # ================= Tracker protocol (pluggable logger) ======================
 class Tracker(Protocol):
@@ -61,15 +74,26 @@ class NoOpTracker:
     def finish(self): pass
 # ===========================================================================
 
+# ---------------------- HF loaders (residuals & embeds) ---------------------
+def _hf_load_residuals_chunk(chunk_id: int, repo_id: str, hf_token: Optional[str]):
+    """Download and load one residuals chunk from HF. (May be any length; caller validates.)"""
+    fname = f"res_data_{chunk_id:03d}.pt"
+    fpath = hf_hub_download(repo_id=repo_id, filename=fname, repo_type="dataset", token=hf_token)
+    return torch.load(fpath, map_location="cpu")
+
+def _hf_load_embeddings_chunk(chunk_id: int, repo_id: str, hf_token: Optional[str]) -> torch.Tensor:
+    """Download and load one embeddings chunk from HF. (May be any length; caller validates.)"""
+    fname = f"outlines_{chunk_id:03d}.pt"
+    fpath = hf_hub_download(repo_id=repo_id, filename=fname, repo_type="dataset", token=hf_token)
+    embeds = torch.load(fpath, map_location="cpu").to(dtype=DTYPE)
+    return embeds
+
+# ====================== Normalization (Welford) ============================
 @dataclass
 class WelfordStats:
-    mean: torch.Tensor
-    m2: torch.Tensor
-    count: int
-    def __init__(self, mean: torch.Tensor = None, m2: torch.Tensor = None, count: int = 0):
-        self.mean = mean if mean is not None else None
-        self.m2 = m2 if m2 is not None else None
-        self.count = count
+    mean: torch.Tensor = None
+    m2: torch.Tensor = None
+    count: int = 0
     def update(self, new_data: torch.Tensor):
         if self.mean is None:
             self.mean = torch.zeros_like(new_data[0])
@@ -83,7 +107,6 @@ class WelfordStats:
             self.m2 += delta * delta2
     @property
     def std(self):
-        # add epsilon for stability; guard count
         denom = max(self.count - 1, 1)
         return torch.sqrt(self.m2 / denom + 1e-6)
 
@@ -99,10 +122,14 @@ class Normalizer:
 # ------------------ Pass 1: compute stats on a subset of chunks --------------------
 def compute_normalizers(
     norm_chunk_ids: List[int],
-    residuals_path: str,
-    hf_repo_id: str,
+    hf_repo_residuals: str,
+    hf_repo_embeds: str,
+    hf_token: Optional[str],
 ) -> Tuple[Normalizer, Normalizer]:
-    """Compute mean/std using Welford over a small subset of chunks."""
+    """
+    Compute mean/std using Welford over a small subset of chunks.
+    Skip any chunk where residuals or embeddings length != 1000.
+    """
     print("\nComputing normalization stats (subset)...")
     logger.info("Computing normalization stats (subset)...")
 
@@ -110,72 +137,81 @@ def compute_normalizers(
     embed_stats = WelfordStats()
     res_reshape = "layer para dim -> para layer dim"
 
+    used, skipped = 0, []
+
     for chunk_id in tqdm(norm_chunk_ids, desc="Stats chunks"):
-        # residuals
-        res_path = Path(residuals_path) / f"res_data_{chunk_id:03d}.pt"
-        res_data_list = torch.load(res_path, map_location="cpu")
-        assert len(res_data_list) == SAMPLES_PER_CHUNK, f"Residuals count mismatch in chunk {chunk_id}"
+        try:
+            res_list = _hf_load_residuals_chunk(chunk_id, hf_repo_residuals, hf_token)
+            embeds   = _hf_load_embeddings_chunk(chunk_id, hf_repo_embeds, hf_token)
 
-        # embeddings
-        emb_file = hf_hub_download(
-            repo_id=hf_repo_id,
-            filename=f"outlines_{chunk_id:03d}.pt",
-            repo_type="dataset",
-            token=os.environ.get("HF_TOKEN"),
-        )
-        embeds = torch.load(emb_file, map_location="cpu").to(dtype=DTYPE)
-        n_embeds = embeds.shape[0] if isinstance(embeds, torch.Tensor) else len(embeds)
-        assert n_embeds == SAMPLES_PER_CHUNK, f"Embeds count mismatch in chunk {chunk_id}"
+            n_res = len(res_list)
+            n_emb = embeds.shape[0] if isinstance(embeds, torch.Tensor) else len(embeds)
 
-        for res, embed in zip(res_data_list, embeds):
-            res_all = res["res"].to(dtype=DTYPE)            # [n_layers, n_para, d_model]
-            first_para = res_all[:, :1, :]                  # keep first paragraph
-            res_tensor = einops.rearrange(first_para, res_reshape)  # [1, n_layers, d_model]
-            res_stats.update(res_tensor)
-            embed_stats.update(embed)
+            if n_res != SAMPLES_PER_CHUNK or n_emb != SAMPLES_PER_CHUNK:
+                logger.warning(f"[norm] skip chunk {chunk_id:03d}: res={n_res}, emb={n_emb} (expected 1000).")
+                skipped.append(chunk_id); continue
+
+            for res, embed in zip(res_list, embeds):
+                res_all = res["res"].to(dtype=DTYPE)                  # [n_layers, n_para, d_model]
+                first_para = res_all[:, :1, :]                        # first paragraph only
+                res_tensor = einops.rearrange(first_para, res_reshape)  # [1, n_layers, d_model]
+                res_stats.update(res_tensor)
+                embed_stats.update(embed)
+
+            used += 1
+
+        except Exception as e:
+            logger.warning(f"[norm] failed chunk {chunk_id:03d}: {e}. Skipping.")
+            skipped.append(chunk_id); continue
+
+    if used == 0:
+        raise RuntimeError("No valid chunks for normalization (after skipping mismatches).")
+
+    logger.info(f"[norm] used {used}/{len(norm_chunk_ids)} chunks; skipped={skipped}")
 
     res_normalizer = Normalizer(res_stats.mean, res_stats.std)
     embed_normalizer = Normalizer(embed_stats.mean, embed_stats.std)
     return res_normalizer, embed_normalizer
 
-# ------------------ Pass 2: streaming dataset (global 90/10 split) ------------------
+# ------------------ Streaming dataset (global 90/10 split) ------------------
 class StreamingOutlineDataset(Dataset):
-    """Stream samples chunk-by-chunk (LRU cache), normalize on-the-fly, global split."""
+    """Stream samples chunk-by-chunk from HF (LRU cache), normalize on-the-fly, global split.
+       Entire chunks are marked BAD and skipped if res/emb length != 1000.
+    """
 
     def __init__(
         self,
-        residuals_path: str,
-        hf_repo_id: str,
+        hf_repo_residuals: str,
+        hf_repo_embeds: str,
         chunk_ids: List[int],
         split: str = "train",
         train_frac: float = 0.9,
         res_normalizer: Optional[Normalizer] = None,
         embed_normalizer: Optional[Normalizer] = None,
         max_cached_chunks: int = 2,
+        hf_token: Optional[str] = None,
     ):
         assert split in {"train", "val"}
         assert 0.0 < train_frac < 1.0
 
-        self.residuals_path = Path(residuals_path)
-        self.hf_repo_id = hf_repo_id
+        self.hf_repo_residuals = hf_repo_residuals
+        self.hf_repo_embeds = hf_repo_embeds
         self.chunk_ids = list(chunk_ids)
         self.res_norm = res_normalizer
         self.emb_norm = embed_normalizer
         self.max_cached = max_cached_chunks
+        self.hf_token = hf_token
 
         # Build global index space (1000 samples per chunk)
         self.total = len(self.chunk_ids) * SAMPLES_PER_CHUNK
         split_point = int(train_frac * self.total)
 
-        if split == "train":
-            idxs = list(range(0, split_point))
-        else:
-            idxs = list(range(split_point, self.total))
-        self.indices = idxs
+        self.indices = list(range(0, split_point)) if split == "train" else list(range(split_point, self.total))
 
         # very small LRU cache: {chunk_id: (res_list, embeds_tensor)}
         self._cache: Dict[int, Tuple[List[Dict], torch.Tensor]] = {}
         self._cache_order: List[int] = []
+        self._bad_chunks: set[int] = set()
 
         # for rearrange
         self._reshape = "layer para dim -> para layer dim"
@@ -196,50 +232,82 @@ class StreamingOutlineDataset(Dataset):
         return chunk_id, sample_in_chunk
 
     def _ensure_in_cache(self, chunk_id: int):
+        if chunk_id in self._bad_chunks:
+            return
+
         if chunk_id in self._cache:
-            # bump in LRU
+            # bump LRU
             self._cache_order.remove(chunk_id)
             self._cache_order.append(chunk_id)
             return
 
-        # load residuals
-        res_path = self.residuals_path / f"res_data_{chunk_id:03d}.pt"
-        res_list = torch.load(res_path, map_location="cpu")
-        assert len(res_list) == SAMPLES_PER_CHUNK
+        try:
+            res_list = _hf_load_residuals_chunk(chunk_id, self.hf_repo_residuals, self.hf_token)
+            embeds   = _hf_load_embeddings_chunk(chunk_id, self.hf_repo_embeds, self.hf_token)
 
-        # load embeddings
-        emb_file = hf_hub_download(
-            repo_id=self.hf_repo_id,
-            filename=f"outlines_{chunk_id:03d}.pt",
-            repo_type="dataset",
-            token=os.environ.get("HF_TOKEN"),
-        )
-        embeds = torch.load(emb_file, map_location="cpu").to(dtype=DTYPE)
-        n_embeds = embeds.shape[0] if isinstance(embeds, torch.Tensor) else len(embeds)
-        assert n_embeds == SAMPLES_PER_CHUNK
+            n_res = len(res_list)
+            n_emb = embeds.shape[0] if isinstance(embeds, torch.Tensor) else len(embeds)
 
-        # insert into cache
-        self._cache[chunk_id] = (res_list, embeds)
-        self._cache_order.append(chunk_id)
+            if n_res != SAMPLES_PER_CHUNK or n_emb != SAMPLES_PER_CHUNK:
+                logger.warning(f"[data] marking chunk {chunk_id:03d} BAD: res={n_res}, emb={n_emb} (expected 1000).")
+                self._bad_chunks.add(chunk_id)
+                return
 
-        # evict if needed
-        if len(self._cache_order) > self.max_cached:
-            evict_id = self._cache_order.pop(0)
-            self._cache.pop(evict_id, None)
+            # valid → cache it
+            self._cache[chunk_id] = (res_list, embeds)
+            self._cache_order.append(chunk_id)
+
+            # evict if needed
+            if len(self._cache_order) > self.max_cached:
+                evict_id = self._cache_order.pop(0)
+                self._cache.pop(evict_id, None)
+
+        except Exception as e:
+            logger.warning(f"[data] failed to load chunk {chunk_id:03d}: {e}. Marking as BAD.")
+            self._bad_chunks.add(chunk_id)
+
+    def _next_good_chunk(self, start_chunk_id: int) -> Optional[int]:
+        """Return the first good chunk at or after start_chunk_id, scanning circularly."""
+        if not self.chunk_ids:
+            return None
+        try:
+            start_idx = self.chunk_ids.index(start_chunk_id)
+        except ValueError:
+            start_idx = 0
+        n = len(self.chunk_ids)
+        for k in range(n):
+            cid = self.chunk_ids[(start_idx + k) % n]
+            if cid in self._bad_chunks:
+                continue
+            # ensure cache/validity
+            self._ensure_in_cache(cid)
+            if cid not in self._bad_chunks and cid in self._cache:
+                return cid
+        return None
 
     def __getitem__(self, i: int):
         global_idx = self.indices[i]
         chunk_id, pos = self._idx_to_chunk_pos(global_idx)
-        self._ensure_in_cache(chunk_id)
-        res_list, embeds = self._cache[chunk_id]
 
-        # fetch item
+        # ensure we know status of this chunk
+        self._ensure_in_cache(chunk_id)
+
+        # if bad or not cached → pick next good chunk
+        if chunk_id in self._bad_chunks or chunk_id not in self._cache:
+            alt = self._next_good_chunk(chunk_id)
+            if alt is None:
+                raise RuntimeError("No valid chunks available (all marked bad).")
+            pos = pos % SAMPLES_PER_CHUNK
+            chunk_id = alt
+
+        res_list, embeds = self._cache[chunk_id]
+        # valid chunks have exactly 1000 rows
         res_all = res_list[pos]["res"].to(dtype=DTYPE)  # [n_layers, n_para, d_model]
         first_para = res_all[:, :1, :]
         res_tensor = einops.rearrange(first_para, self._reshape)  # [1, n_layers, d_model]
         emb = embeds[pos]
 
-        # normalize on the fly
+        # normalize
         if self.res_norm is not None:
             res_tensor = self.res_norm.normalize(res_tensor)
         if self.emb_norm is not None:
@@ -344,34 +412,6 @@ class ProbeTrainer:
         print(summary); logger.info(summary)
         return avg_loss
 
-    def train(self, num_epochs: int, train_loader: DataLoader, val_loader: DataLoader,
-              save_checkpoints: bool = True) -> Dict[str, List[float]]:
-        train_losses, val_losses = [], []
-        setup = (f"\nTraining Configuration:\n- Epochs: {num_epochs}\n- Training batches: {len(train_loader)}"
-                 f"\n- Validation batches: {len(val_loader)}\n- Initial LR: {self.lr}\n- LR Decay: {self.lr_decay}"
-                 f"\n- Batch size: {self.batch_size}\n- Weight decay: {self.weight_decay}\n- Device: {DEVICE}"
-                 f"\n- Checkpoints: {self.checkpoint_dir if save_checkpoints else 'disabled'}")
-        print(setup); logger.info(setup)
-        try:
-            for epoch in range(num_epochs):
-                tr = self.train_epoch(epoch, train_loader); train_losses.append(tr)
-                vl = self.validate(val_loader); val_losses.append(vl)
-                epoch_info = (f"\nEpoch {epoch+1} Summary:\n- Train Loss: {tr:.4f}\n- Val Loss: {vl:.4f}"
-                              f"\n- Learning Rate: {self.scheduler.get_last_lr()[0]:.2e}")
-                print(epoch_info); logger.info(epoch_info)
-                self.tracker.log({"epoch": epoch + 1, "epoch/train_loss": tr, "epoch/val_loss": vl,
-                                  "epoch/lr": self.scheduler.get_last_lr()[0]})
-                if save_checkpoints:
-                    ckpt = os.path.join(self.checkpoint_dir, f"probe_epoch_{epoch+1}.pt")
-                    self.save_checkpoint(ckpt, epoch, tr, vl)
-                    logger.info(f"Saved checkpoint to {ckpt}")
-                    self.tracker.log_artifact(ckpt, name=f"checkpoint-epoch-{epoch+1}",
-                                              type_="model", description=f"Linear probe after epoch {epoch+1}")
-                self.scheduler.step()
-        except KeyboardInterrupt:
-            print("\nTraining interrupted by user")
-        return {"train_losses": train_losses, "val_losses": val_losses}
-
     def save_checkpoint(self, checkpoint_path: str, epoch: int, train_loss: float, val_loss: float):
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
         torch.save({
@@ -383,7 +423,7 @@ class ProbeTrainer:
             "val_loss": val_loss,
         }, checkpoint_path)
 
-# ---------------------- helpers & entrypoint ------------------------------
+# ---------------------- helpers ------------------------------
 def _save_normalizers(res_normalizer: Normalizer, embed_normalizer: Normalizer, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     res_path = out_dir / "res_normalizer.pt"
@@ -392,85 +432,224 @@ def _save_normalizers(res_normalizer: Normalizer, embed_normalizer: Normalizer, 
     torch.save({"mean": embed_normalizer.mean, "std": embed_normalizer.std}, emb_path)
     return str(res_path), str(emb_path)
 
-def train_probe(residuals_path: str = RESIDUALS_PATH, hf_repo_id: str = HF_REPO_ID,
-                n_epochs: int = 10, batch_size: int = 32, learning_rate: float = 1e-4,
-                start_chunk: int = 0, end_chunk: int = 0,
-                checkpoint_dir: str = str(Path(RESULTS_DIR) / "probes"),
-                tracker: Optional[Tracker] = None,
-                norm_chunks: int = 10,
-                train_frac: float = 0.9,
-                max_cached_chunks: int = 2):
-    """Main training function (streaming + global split)."""
+def _log_epoch_chunk_selection(
+    tracker: "Tracker",
+    epoch_idx: int,
+    epoch_chunks: List[int],
+    out_dir: Path,
+    run_name: str = "probe",
+):
+    """
+    Log the list of chunk IDs used in this epoch to W&B and upload as a text artifact.
+    """
+    # Scalar + a short preview in logs
+    preview = [int(c) for c in epoch_chunks[:16]]
+    tracker.log({
+        "epoch": epoch_idx + 1,
+        "epoch/chunks_count": len(epoch_chunks),
+        "epoch/chunks_preview_first16": preview,
+    })
+
+    # Save the full list to a txt file to keep it simple & readable
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fname = out_dir / f"{run_name}_epoch{epoch_idx+1:03d}_chunks.txt"
+    with open(fname, "w") as f:
+        f.write("\n".join(str(int(c)) for c in epoch_chunks))
+
+    # Upload as an artifact so you can download it later
+    tracker.log_artifact(
+        str(fname),
+        name=f"epoch-{epoch_idx+1:03d}-chunks.txt",
+        type_="metadata",
+        description=f"Chunk IDs used for epoch {epoch_idx+1}",
+    )
+
+# ---------------------- entrypoint ------------------------------
+def train_probe(
+    start_chunk: int = 0,
+    end_chunk: int = 0,
+    n_epochs: int = 10,
+    batch_size: int = 32,
+    learning_rate: float = 1e-4,
+    checkpoint_dir: str = str(Path(RESULTS_DIR) / "probes"),
+    tracker: Optional[Tracker] = None,
+    norm_chunks: int = 10,
+    train_frac: float = 0.9,
+    max_cached_chunks: int = 2,
+    hf_repo_residuals: str = HF_REPO_ID_RESIDUALS,
+    hf_repo_embeds: str = HF_REPO_ID_EMBEDS,
+    hf_token: Optional[str] = os.environ.get("HF_TOKEN"),
+    resume_from: Optional[str] = None,
+    chunks_per_epoch: Optional[int] = None,
+    chunk_seed: int = 42,  # kept for API compatibility; unused now that we don't shuffle
+):
+    """Main training function (HF per-chunk streaming + global split + epoch-wise chunk rotation)."""
     tracker = tracker or NoOpTracker()
     checkpoint_dir = Path(checkpoint_dir); checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    chunk_ids = list(range(start_chunk, end_chunk + 1))
-    assert len(chunk_ids) > 0, "No chunks selected."
-    print("Selected chunks:", [f"{i:03d}" for i in chunk_ids])
+    # Build full chunk range (ascending order)
+    all_chunks = list(range(start_chunk, end_chunk + 1))
+    assert len(all_chunks) > 0, "No chunks selected."
+    disp = [f"{i:03d}" for i in all_chunks[:10]]
+    if len(all_chunks) > 10:
+        disp.append("...")
+    print("Selected chunks (full range):", disp)
 
-    # Pass 1: compute normalizers on a small subset
-    norm_chunk_ids = chunk_ids[:min(norm_chunks, len(chunk_ids))]
-    res_norm, emb_norm = compute_normalizers(norm_chunk_ids, residuals_path, hf_repo_id)
+    # ------------------ Epoch rotation plan (ORDERED, no shuffle) ------------------
+    epoch_slices: List[List[int]]
+    if chunks_per_epoch and chunks_per_epoch > 0:
+        # keep natural ascending order of chunk IDs; contiguous slices
+        perm = all_chunks[:]  # already ordered
+        epoch_slices = [perm[i:i + chunks_per_epoch] for i in range(0, len(perm), chunks_per_epoch)]
+    else:
+        epoch_slices = [all_chunks]  # default: full set each epoch
 
-    # Save & (optionally) log normalizers
+    # Normalization on a subset of the *full* range (first norm_chunks from full order)
+    norm_chunk_ids = all_chunks[:min(norm_chunks, len(all_chunks))]
+    res_norm, emb_norm = compute_normalizers(norm_chunk_ids, hf_repo_residuals, hf_repo_embeds, hf_token)
+
+    # Save normalizers locally (log via tracker in your wandb adapter)
     res_p, emb_p = _save_normalizers(res_norm, emb_norm, Path(RESULTS_DIR) / "normalizers")
-    tracker.log_artifact(res_p, name="res_normalizer.pt", type_="asset", description="Residual normalizer")
-    tracker.log_artifact(emb_p, name="embed_normalizer.pt", type_="asset", description="Embedding normalizer")
 
-    # Pass 2: streaming datasets (no full materialization). Global fixed split 90/10 by default.
-    train_dataset = StreamingOutlineDataset(
-        residuals_path=residuals_path,
-        hf_repo_id=hf_repo_id,
-        chunk_ids=chunk_ids,
+    # Prepare a tiny temp dataset to infer shapes (use first slice)
+    first_slice = epoch_slices[0]
+    assert len(first_slice) > 0, "Empty epoch slice."
+    _tmp_ds = StreamingOutlineDataset(
+        hf_repo_residuals=hf_repo_residuals,
+        hf_repo_embeds=hf_repo_embeds,
+        chunk_ids=first_slice,
         split="train",
         train_frac=train_frac,
         res_normalizer=res_norm,
         embed_normalizer=emb_norm,
         max_cached_chunks=max_cached_chunks,
+        hf_token=hf_token,
     )
-    val_dataset = StreamingOutlineDataset(
-        residuals_path=residuals_path,
-        hf_repo_id=hf_repo_id,
-        chunk_ids=chunk_ids,
-        split="val",
-        train_frac=train_frac,
-        res_normalizer=res_norm,
-        embed_normalizer=emb_norm,
-        max_cached_chunks=max_cached_chunks,
-    )
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-
-    # model init: infer shapes from a sample
-    sample_res, _, _ = train_dataset[0]
+    sample_res, _, _ = _tmp_ds[0]
     n_layers, d_model = sample_res.shape[1], sample_res.shape[2]
     print(f"\nInitializing probe:\n- Input: [batch, {n_layers} layers, {d_model} dims]\n- Output: 1024")
     probe = LinearProbe(n_layers=n_layers, d_model=d_model).to(DEVICE)
 
+    # Build run config & init tracker BEFORE logging artifacts
     run_config = {
         "n_epochs": n_epochs, "batch_size": batch_size, "learning_rate": learning_rate,
         "start_chunk": start_chunk, "end_chunk": end_chunk,
-        "device": str(DEVICE), "dtype": str(DTYPE), "hf_repo_id": hf_repo_id,
-        "residuals_path": residuals_path, "n_layers": int(n_layers), "d_model": int(d_model),
-        "d_sonar": 1024, "num_train_batches": len(train_loader), "num_val_batches": len(val_loader),
+        "device": str(DEVICE), "dtype": str(DTYPE),
+        "hf_repo_residuals": hf_repo_residuals, "hf_repo_embeds": hf_repo_embeds,
+        "n_layers": int(n_layers), "d_model": int(d_model), "d_sonar": 1024,
         "norm_chunks": norm_chunks, "norm_chunk_ids": norm_chunk_ids,
         "train_frac": train_frac, "max_cached_chunks": max_cached_chunks,
-        "total_samples": len(chunk_ids) * SAMPLES_PER_CHUNK,
+        "total_samples_full_range": len(all_chunks) * SAMPLES_PER_CHUNK,
+        "chunks_per_epoch": chunks_per_epoch, "chunk_seed": chunk_seed,
+        "resume_from": resume_from,
+        "results_dir": str(RESULTS_DIR),
+        "checkpoint_dir": str(checkpoint_dir),
     }
     tracker.on_start(run_config); tracker.define_metrics(); tracker.watch(probe)
 
+    # Optional: visible norm stats
+    try:
+        tracker.log({
+            "norm/res_mean_abs": float(res_norm.mean.abs().mean().item()),
+            "norm/res_std_mean": float(res_norm.std.mean().item()),
+            "norm/emb_mean_abs": float(emb_norm.mean.abs().mean().item()),
+            "norm/emb_std_mean": float(emb_norm.std.mean().item()),
+        })
+    except Exception:
+        pass
+
+    # Upload normalizer artifacts
+    tracker.log_artifact(res_p, name="res_normalizer.pt", type_="asset", description="Residual normalizer")
+    tracker.log_artifact(emb_p, name="embed_normalizer.pt", type_="asset", description="Embedding normalizer")
+
+    # Trainer
     trainer = ProbeTrainer(probe=probe, lr=learning_rate, batch_size=batch_size,
                            checkpoint_dir=str(checkpoint_dir), tracker=tracker)
-    losses = trainer.train(num_epochs=n_epochs, train_loader=train_loader, val_loader=val_loader, save_checkpoints=True)
+
+    # ------- Resume support -------
+    start_epoch = 0
+    if resume_from:
+        if os.path.isfile(resume_from):
+            ckpt = torch.load(resume_from, map_location=DEVICE)
+            try:
+                trainer.probe.load_state_dict(ckpt["model_state_dict"])
+                trainer.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                trainer.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+                start_epoch = int(ckpt.get("epoch", 0) + 1)  # continue with NEXT epoch
+                print(f"[resume] Loaded checkpoint '{resume_from}', resuming at epoch {start_epoch}.")
+            except Exception as e:
+                print(f"[resume] Failed to load checkpoint '{resume_from}': {e}")
+        else:
+            print(f"[resume] Checkpoint not found: {resume_from}")
+
+    # ------- Epoch-wise subset training -------
+    total_epochs = n_epochs
+    for epoch in range(start_epoch, total_epochs):
+        slice_idx = epoch % len(epoch_slices)
+        epoch_chunks = epoch_slices[slice_idx]
+        _log_epoch_chunk_selection(
+            tracker=trainer.tracker,
+            epoch_idx=epoch,
+            epoch_chunks=epoch_chunks,
+            out_dir=Path(RESULTS_DIR) / "chunk_schedules",
+            run_name="probe",
+        )
+        disp = [f"{c:03d}" for c in epoch_chunks[:8]]
+        if len(epoch_chunks) > 8:
+            disp.append("...")
+        print(f"\n[epoch {epoch+1}] Using {len(epoch_chunks)} chunks: {disp}")
+
+        train_dataset = StreamingOutlineDataset(
+            hf_repo_residuals=hf_repo_residuals,
+            hf_repo_embeds=hf_repo_embeds,
+            chunk_ids=epoch_chunks,
+            split="train",
+            train_frac=train_frac,
+            res_normalizer=res_norm,
+            embed_normalizer=emb_norm,
+            max_cached_chunks=max_cached_chunks,
+            hf_token=hf_token,
+        )
+        val_dataset = StreamingOutlineDataset(
+            hf_repo_residuals=hf_repo_residuals,
+            hf_repo_embeds=hf_repo_embeds,
+            chunk_ids=epoch_chunks,
+            split="val",
+            train_frac=train_frac,
+            res_normalizer=res_norm,
+            embed_normalizer=emb_norm,
+            max_cached_chunks=max_cached_chunks,
+            hf_token=hf_token,
+        )
+
+        # ---------------- No shuffling in loaders (ordered iteration) ----------------
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+        val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False)
+
+        # one epoch
+        tr = trainer.train_epoch(epoch, train_loader)
+        vl = trainer.validate(val_loader)
+
+        print(f"\nEpoch {epoch+1} Summary:\n- Train Loss: {tr:.4f}\n- Val Loss: {vl:.4f}"
+              f"\n- Learning Rate: {trainer.scheduler.get_last_lr()[0]:.2e}")
+        trainer.tracker.log({"epoch": epoch + 1, "epoch/train_loss": tr, "epoch/val_loss": vl,
+                             "epoch/lr": trainer.scheduler.get_last_lr()[0]})
+
+        # checkpoint per epoch
+        ckpt_path = os.path.join(str(checkpoint_dir), f"probe_epoch_{epoch+1}.pt")
+        trainer.save_checkpoint(ckpt_path, epoch, tr, vl)
+        logger.info(f"Saved checkpoint to {ckpt_path}")
+        trainer.tracker.log_artifact(ckpt_path, name=f"checkpoint-epoch-{epoch+1}",
+                                     type_="model", description=f"Linear probe after epoch {epoch+1}")
+
+        trainer.scheduler.step()
+
     tracker.finish()
-    return trainer, losses
+    return trainer, {"note": "epoch-wise chunk rotation (ordered, no shuffle)"}
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Core probe trainer (streaming; global 90/10 split).")
-    parser.add_argument("--residuals-path", default=RESIDUALS_PATH)
-    parser.add_argument("--hf-repo-id", default=HF_REPO_ID)
+    parser = argparse.ArgumentParser(description="Core probe trainer (HF chunk streaming; epoch-wise chunk rotation).")
     parser.add_argument("--start-chunk", type=int, default=0)
     parser.add_argument("--end-chunk", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -483,15 +662,34 @@ if __name__ == "__main__":
     parser.add_argument("--max-cached-chunks", type=int, default=2,
                         help="LRU cache size in chunks (default: 2).")
     parser.add_argument("--checkpoint-dir", type=str, default=str(Path(RESULTS_DIR) / "probes"))
+    parser.add_argument("--hf-repo-residuals", type=str, default=HF_REPO_ID_RESIDUALS)
+    parser.add_argument("--hf-repo-embeds", type=str, default=HF_REPO_ID_EMBEDS)
+    parser.add_argument("--hf-token", type=str, default=os.environ.get("HF_TOKEN"))
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--resume-from", type=str, default=None, help="Path to a checkpoint .pt to resume training from.")
+    parser.add_argument("--chunks-per-epoch", type=int, default=None,
+                        help="If set, train/val only on this many chunks per epoch, rotating through the range.")
+    parser.add_argument("--chunk-seed", type=int, default=42,
+                        help="(Kept for compatibility) Seed ignored when not shuffling chunks.")
     args = parser.parse_args()
 
     if args.cpu:
         DEVICE = torch.device("cpu")
 
-    train_probe(residuals_path=args.residuals_path, hf_repo_id=args.hf_repo_id,
-                start_chunk=args.start_chunk, end_chunk=args.end_chunk,
-                batch_size=args.batch_size, learning_rate=args.learning_rate,
-                n_epochs=args.n_epochs, train_frac=args.train_frac,
-                norm_chunks=args.norm_chunks, max_cached_chunks=args.max_cached_chunks,
-                checkpoint_dir=args.checkpoint_dir)
+    train_probe(
+        start_chunk=args.start_chunk,
+        end_chunk=args.end_chunk,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        n_epochs=args.n_epochs,
+        train_frac=args.train_frac,
+        norm_chunks=args.norm_chunks,
+        max_cached_chunks=args.max_cached_chunks,
+        checkpoint_dir=args.checkpoint_dir,
+        hf_repo_residuals=args.hf_repo_residuals,
+        hf_repo_embeds=args.hf_repo_embeds,
+        hf_token=args.hf_token,
+        resume_from=args.resume_from,
+        chunks_per_epoch=args.chunks_per_epoch,
+        chunk_seed=args.chunk_seed,
+    )

@@ -17,12 +17,11 @@ from yulia.outlines.config import (
 )
 from yulia.outlines.hf_utils import get_standard_features
 
-# Conf
+
 NUM_WORKERS = 50  
 BATCH_SIZE = 200 
 
 def process_sample(sample: Dict[str, Any], example_id: int) -> Dict[str, Any]:
-    """Process a single sample to generate outline."""
     completion = sample["completion"]
     model = MODELS[0]  
     
@@ -35,11 +34,10 @@ def process_sample(sample: Dict[str, Any], example_id: int) -> Dict[str, Any]:
         "completion": completion,
         "outline_generated": outline,
         "reconstructed_text": "",  # Empty as we'll generate this later with embeddings if we choose to 
-        "embedding_id": example_id  # Same as example_id for alignment
+        "embedding_id": example_id  
     }
 
 def process_batch(batch: List[Dict], start_id: int, batch_num: int = 0) -> List[Dict]:
-    """Process a batch of samples in parallel."""
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
         futures = []
         for i, sample in enumerate(batch):
@@ -67,7 +65,7 @@ def upload_to_hub(df: pd.DataFrame, repo_id: str, version: str) -> None:
     api = HfApi()
     CHUNK_SIZE = 100000  # 100k samples per parquet
     
-    # Create local results directory
+    # local results dir
     local_dir = Path(os.path.dirname(__file__)) / "results" / "gemma27b" / f"v{version}"
     local_dir.mkdir(parents=True, exist_ok=True)
     
@@ -87,7 +85,7 @@ def upload_to_hub(df: pd.DataFrame, repo_id: str, version: str) -> None:
     
     while current_chunk <= max_id // CHUNK_SIZE:
         chunk_start_id = current_chunk * CHUNK_SIZE
-        # Special handling for final chunk (chunk 9) to allow up to 100,001 items
+        # Special handling for final chunk (chunk 9) to allow up to 100,001 items althought I dont think this is needed
         if current_chunk == 9:
             chunk_end_id = min(max_id, 1000000)  # Allow up to 1,000,000 
         else:
@@ -141,11 +139,11 @@ def upload_to_hub(df: pd.DataFrame, repo_id: str, version: str) -> None:
                 chunk_df = chunk_df.drop('__index_level_0__', axis=1)
             hf_dataset = Dataset.from_pandas(chunk_df, features=get_standard_features())
             
-            # Save locally and to HF
+            
             hf_data_path = f"v{version}/data/outlines_{current_chunk:03d}.parquet"
             local_data_path = local_dir / f"outlines_{current_chunk:03d}.parquet"
             
-            # Save locally
+            
             os.makedirs(os.path.dirname(hf_data_path), exist_ok=True)  # For HF upload
             hf_dataset.to_parquet(hf_data_path)
             
@@ -212,7 +210,7 @@ def main(
             batch = []
             batch_num += 1
             
-            # Upload when we've collected 100k samples
+            # Upload when collected 100k samples
             if len(results_buffer) >= CHUNK_SIZE:
                 print(f"\nUploading chunk with {len(results_buffer)} samples...")
                 df = pd.DataFrame(results_buffer).reset_index(drop=True)

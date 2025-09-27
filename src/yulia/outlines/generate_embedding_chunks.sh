@@ -8,7 +8,7 @@ export PYTHONPATH=$PYTHONPATH:$BASE_DIR
 
 for chunk in {1..9}; do
     echo "Processing chunk $chunk..."
-    python yulia/outlines/generate_embeddings.py $chunk
+    python yulia/outlines/generate_outline_embeddings.py $chunk
     
     # Check if the command was successful
     if [ $? -ne 0 ]; then

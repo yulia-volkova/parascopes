@@ -7,7 +7,6 @@ from huggingface_hub import HfApi
 from yulia.outlines.config import HF_REPO_ID
 
 def download_chunk(version: str, chunk_id: str):
-    # Download the chunk
     api = HfApi()
     chunk_path = f"v{version}/data/outlines_{chunk_id}.parquet"
     local_path = chunk_path
@@ -20,7 +19,6 @@ def download_chunk(version: str, chunk_id: str):
         local_dir="."
     )
     
-    # Load the chunk
     print(f"Loading chunk_{chunk_id}...")
     dataset = load_dataset("parquet", data_files=local_path, split="train")
     df = dataset.to_pandas()
@@ -45,7 +43,6 @@ def download_chunk(version: str, chunk_id: str):
     os.remove(local_path)
 
 def main(version: str = "5.0"):
-    # Download all 9 chunks (000-008)
     chunk_ids = [f"{i:03d}" for i in range(9)]  # Creates ["000", "001", ..., "008"]
     
     print(f"Downloading {len(chunk_ids)} chunks from v{version}/data/")

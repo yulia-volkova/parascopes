@@ -160,7 +160,6 @@ def upload_to_hub(df: pd.DataFrame, repo_id: str, version: str) -> None:
             )
             print(f"✓ Uploaded chunk_{current_chunk:03d} to HF")
             
-            # Clean up HF temp file
             os.remove(hf_data_path)
         
         current_chunk += 1

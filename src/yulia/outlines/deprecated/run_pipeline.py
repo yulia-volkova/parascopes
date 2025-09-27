@@ -13,6 +13,9 @@ from yulia.outlines.config import (
     SONAR_BATCH_SIZE, PROCESS_BATCH_SIZE,
     HF_REPO_ID, HF_PRIVATE, VERSION
 )
+
+# Firts version of outlines generation pipeline that was later replaced by the parallelized one
+
 from sonar.inference_pipelines.text import (
     TextToEmbeddingModelPipeline,
     EmbeddingToTextModelPipeline

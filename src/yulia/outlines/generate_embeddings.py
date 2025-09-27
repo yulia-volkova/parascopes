@@ -79,11 +79,10 @@ def generate_embeddings_for_chunk(
     example_ids: list,
     test_mode: bool = False
 ) -> None:
-    """Generate and save embeddings for a chunk of outlines."""
     # Generate embeddings in batches with progress bar
     embeddings_list = []
     # Smaller batch size for GPU to avoid memory issues, larger for CPU
-    batch_size = 64 if torch.cuda.is_available() else 512  # Larger batches for CPU to better utilize vectorization
+    batch_size = 64 if torch.cuda.is_available() else 512
     
     # Process in sub-chunks of 1000 samples
     sub_chunk_size = 1000
@@ -182,7 +181,6 @@ def main(
             if df.empty:
                 print(f"Warning: Chunk {chunk_id:03d} is empty")
             else:
-                # Print chunk info
                 print(f"\nChunk {chunk_id:03d} info:")
                 print(f"Total samples: {len(df)}")
                 print(f"First 5 example IDs: {df['example_id'].head().tolist()}")
@@ -206,7 +204,6 @@ def main(
                         print(f"Warning: Chunk {chunk_id:03d} is empty, skipping...")
                         continue
                         
-                    # Print chunk info
                     print(f"\nChunk {chunk_id:03d} info:")
                     print(f"Total samples: {len(df)}")
                     print(f"First 5 example IDs: {df['example_id'].head().tolist()}")

@@ -4,7 +4,6 @@ import os
 import sys
 import torch
 import traceback
-import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 from datasets import load_dataset
